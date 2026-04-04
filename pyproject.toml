@@ -1,0 +1,57 @@
+[tool.poetry]
+name = "projectwrap"
+version = "0.1.0"
+description = "Isolated project environments with bubblewrap sandboxing"
+readme = "README.md"
+license = "MIT"
+authors = ["Fredrik Håård <fredrik@haard.se>"]
+keywords = ["sandbox", "bubblewrap", "bwrap", "isolation", "development", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+packages = [{ include = "project_wrap", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+pytest-cov = "^4.0"
+ruff = "^0.4"
+mypy = "^1.0"
+
+[tool.poetry.scripts]
+pwrap = "project_wrap.cli:main"
+
+[tool.poetry.urls]
+Homepage = "https://github.com/haard/project-wrap"
+Repository = "https://github.com/haard/project-wrap"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
