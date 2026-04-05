@@ -38,17 +38,11 @@ DEPS = {
         install_hint="sudo apt install bubblewrap",
         required_for="sandbox isolation",
     ),
-    "gocryptfs": Dependency(
-        name="gocryptfs",
-        binary="gocryptfs",
-        install_hint="sudo apt install gocryptfs",
-        required_for="encrypted volumes",
-    ),
-    "fusermount": Dependency(
-        name="FUSE utilities",
-        binary="fusermount",
-        install_hint="sudo apt install fuse",
-        required_for="unmounting encrypted volumes",
+    "age": Dependency(
+        name="age",
+        binary="age",
+        install_hint="sudo apt install age",
+        required_for="decrypting secrets",
     ),
 }
 

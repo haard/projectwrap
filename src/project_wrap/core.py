@@ -6,7 +6,7 @@ import os
 import shlex
 import subprocess
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +22,7 @@ class ProjectExec:
     display_name: str
     program: str
     argv: list[str]
-    env_updates: dict[str, str] = field(default_factory=dict)
     is_sandboxed: bool = False
-    is_legacy: bool = False
     verbose_info: str | None = None
 
 
@@ -105,7 +103,7 @@ def _tiocsti_vulnerable() -> bool:
     return major < 6 or (major == 6 and minor < 2)
 
 
-_SCHEMA: dict[str, dict[str, type] | None] = {
+_SCHEMA: dict[str, dict[str, type]] = {
     "project": {"name": str, "dir": str, "shell": str},
     "sandbox": {
         "enabled": bool,
@@ -116,9 +114,7 @@ _SCHEMA: dict[str, dict[str, type] | None] = {
         "new_session": bool,
         "writable": list,
     },
-    "env": None,
-    "encrypted": None,
-    "venv": {"path": str},
+    "secrets": {"archive": str, "identity": str, "dest": str},
 }
 
 
@@ -139,49 +135,34 @@ def validate_config(config: dict[str, Any]) -> None:
         if not isinstance(value, dict):
             raise SystemExit(f"[{section}] must be a table, got {type(value).__name__}")
 
-        if rules is None:
-            for k, v in value.items():
-                if not isinstance(v, str):
+        unknown_keys = set(value.keys()) - rules.keys()
+        if unknown_keys:
+            raise SystemExit(
+                f"[{section}] unknown keys: {sorted(unknown_keys)}\n"
+                f"Allowed: {sorted(rules.keys())}"
+            )
+        for k, v in value.items():
+            expected = rules[k]
+            if expected is list:
+                if not isinstance(v, list):
                     raise SystemExit(
-                        f"[{section}].{k}: expected string, got {type(v).__name__}"
+                        f"[{section}].{k}: expected list, got {type(v).__name__}"
                     )
-        else:
-            unknown_keys = set(value.keys()) - rules.keys()
-            if unknown_keys:
+                if not all(isinstance(item, str) for item in v):
+                    raise SystemExit(f"[{section}].{k}: all items must be strings")
+            elif not isinstance(v, expected):
                 raise SystemExit(
-                    f"[{section}] unknown keys: {sorted(unknown_keys)}\n"
-                    f"Allowed: {sorted(rules.keys())}"
+                    f"[{section}].{k}: expected {expected.__name__}, "
+                    f"got {type(v).__name__}"
                 )
-            for k, v in value.items():
-                expected = rules[k]
-                if expected is list:
-                    if not isinstance(v, list):
-                        raise SystemExit(
-                            f"[{section}].{k}: expected list, got {type(v).__name__}"
-                        )
-                    if not all(isinstance(item, str) for item in v):
-                        raise SystemExit(f"[{section}].{k}: all items must be strings")
-                elif not isinstance(v, expected):
-                    raise SystemExit(
-                        f"[{section}].{k}: expected {expected.__name__}, "
-                        f"got {type(v).__name__}"
-                    )
 
 
 def load_config(name: str) -> dict[str, Any]:
-    """Load project configuration.
-
-    Supports both legacy flat files and new directory-based configs.
-    """
+    """Load project configuration."""
     validate_project_name(name)
     config_dir = get_config_dir()
     project_path = config_dir / name
 
-    # Legacy flat file support
-    if project_path.is_file():
-        return {"_legacy": True, "_path": project_path}
-
-    # New directory-based config
     if not project_path.is_dir():
         raise SystemExit(f"Unknown project: {name}")
 
@@ -199,62 +180,20 @@ def load_config(name: str) -> dict[str, Any]:
     return config
 
 
-def mount_encrypted(encrypted: dict[str, str], verbose: bool = False) -> list[Path]:
-    """Mount gocryptfs volumes.
-
-    Args:
-        encrypted: Mapping of source (encrypted) to destination (mount point)
-        verbose: Print mount operations
-
-    Returns:
-        List of newly mounted paths (for tracking what to unmount)
-    """
-    require_dep("gocryptfs")
-
-    mounted: list[Path] = []
-
-    for src, dst in encrypted.items():
-        src_path = expand_path(src)
-        dst_path = expand_path(dst)
-
-        # Check if already mounted
-        result = subprocess.run(
-            ["mountpoint", "-q", str(dst_path)],
-            capture_output=True,
-        )
-
-        if result.returncode != 0:
-            # Not mounted, mount it
-            dst_path.mkdir(parents=True, exist_ok=True)
-
-            if verbose:
-                print(f"Mounting encrypted: {src_path} → {dst_path}")
-
-            # gocryptfs will prompt for password
-            result = subprocess.run(["gocryptfs", str(src_path), str(dst_path)])
-            if result.returncode != 0:
-                raise SystemExit(f"Failed to mount encrypted volume: {src_path}")
-
-            mounted.append(dst_path)
-        elif verbose:
-            print(f"Already mounted: {dst_path}")
-
-    return mounted
-
 
 def build_bwrap_args(
     sandbox: dict[str, Any],
-    env: dict[str, str],
     project_dir: Path,
     init_script: Path | None = None,
+    ro_bind_extra: list[Path] | None = None,
 ) -> list[str]:
     """Build bubblewrap command arguments.
 
     Args:
         sandbox: Sandbox configuration dict
-        env: Environment variables to set
         project_dir: Project working directory
         init_script: Optional init script to bind-mount read-only into sandbox
+        ro_bind_extra: Additional paths to bind-mount read-only (e.g. secrets files)
 
     Returns:
         List of bwrap arguments
@@ -283,8 +222,14 @@ def build_bwrap_args(
     uid = os.getuid()
     args.extend(["--tmpfs", f"/run/user/{uid}"])
 
+    # Always blacklist the config directory (prevents reading other project configs
+    # or modifying sandbox rules from inside the sandbox)
+    config_dir_resolved = get_config_dir().resolve()
+    if config_dir_resolved.exists():
+        args.extend(["--tmpfs", str(config_dir_resolved)])
+
     # Blacklist paths by overlaying with tmpfs
-    blacklist_paths: list[Path] = []
+    blacklist_paths: list[Path] = [config_dir_resolved]
     for path in sandbox.get("blacklist", []):
         p = expand_path(path)
         if not p.exists():
@@ -328,6 +273,10 @@ def build_bwrap_args(
     if init_script is not None:
         args.extend(["--ro-bind", str(init_script), str(init_script)])
 
+    # Bind-mount extra read-only paths (e.g. secrets archive + identity)
+    for path in ro_bind_extra or []:
+        args.extend(["--ro-bind", str(path), str(path)])
+
     # TIOCSTI protection (--new-session breaks fish TTY, so only enable when needed)
     vulnerable = _tiocsti_vulnerable()
     new_session_cfg = sandbox.get("new_session")
@@ -356,9 +305,6 @@ def build_bwrap_args(
 
     # Set environment variables
     args.extend(["--setenv", "PROJECT_WRAP", "1"])
-    for key, value in env.items():
-        expanded = os.path.expanduser(value)
-        args.extend(["--setenv", key, expanded])
 
     # Set working directory
     args.extend(["--chdir", str(project_dir)])
@@ -385,30 +331,36 @@ def get_init_script(config_dir: Path, shell: str) -> Path | None:
     return None
 
 
+@dataclass
+class ResolvedSecrets:
+    """Resolved secrets config with absolute paths."""
+
+    archive: Path
+    identity: Path
+    dest: str
+
+
 def _build_init_commands(
     project_dir: Path,
     config_dir: Path,
     shell: str,
-    venv_cfg: dict[str, Any],
+    secrets: ResolvedSecrets | None = None,
 ) -> list[str]:
-    """Build setup commands (cd, venv activation, init script sourcing).
+    """Build setup commands (cd, secrets decryption, init script sourcing).
 
     Returns list of shell commands — does NOT include the final exec/shell launch.
     """
-    commands = [f"cd {shlex.quote(str(project_dir))}"]
-    shell_name = Path(shell).name
+    commands: list[str] = []
 
-    # Virtual environment activation
-    if venv_path := venv_cfg.get("path"):
-        venv_full = project_dir / venv_path
+    # Decrypt secrets archive into sandbox tmpfs (before cd so dest can be absolute)
+    if secrets is not None:
+        dest = shlex.quote(secrets.dest)
+        archive = shlex.quote(str(secrets.archive))
+        identity = shlex.quote(str(secrets.identity))
+        commands.append(f"mkdir -p {dest}")
+        commands.append(f"age -d -i {identity} {archive} | tar x -C {dest}")
 
-        if shell_name == "fish":
-            activate = venv_full / "bin" / "activate.fish"
-        else:
-            activate = venv_full / "bin" / "activate"
-
-        if activate.exists():
-            commands.append(f"source {shlex.quote(str(activate))}")
+    commands.append(f"cd {shlex.quote(str(project_dir))}")
 
     # Custom init script
     if init_script := get_init_script(config_dir, shell):
@@ -421,41 +373,20 @@ def build_shell_argv(
     project_dir: Path,
     config_dir: Path,
     shell: str,
-    venv_cfg: dict[str, Any],
+    secrets: ResolvedSecrets | None = None,
 ) -> list[str]:
     """Build the full argv to launch an interactive shell with project setup.
 
     Uses shell-specific mechanisms so setup runs inside the interactive shell:
     - fish: --init-command (runs after config.fish, before prompt)
-    - bash: --rcfile with a temp file that sources .bashrc then runs setup
-    - fallback: -c "setup; exec shell" (legacy behavior)
+    - other shells: -c "setup; exec shell"
     """
-    commands = _build_init_commands(project_dir, config_dir, shell, venv_cfg)
-    init_string = "; ".join(commands)
+    commands = _build_init_commands(project_dir, config_dir, shell, secrets)
     shell_name = Path(shell).name
 
     if shell_name == "fish":
-        return [shell, "--init-command", init_string]
+        return [shell, "--init-command", "; ".join(commands)]
 
-    if shell_name == "bash":
-        import tempfile
-
-        # --rcfile replaces normal .bashrc sourcing, so we source it explicitly
-        rcfile = tempfile.NamedTemporaryFile(
-            mode="w", prefix="projectwrap-init-", suffix=".sh", delete=False
-        )
-        bashrc = Path.home() / ".bashrc"
-        lines = []
-        if bashrc.exists():
-            lines.append(f"source {shlex.quote(str(bashrc))}")
-        lines.append(init_string)
-        # Clean up the temp file after sourcing
-        lines.append(f"rm -f {shlex.quote(rcfile.name)}")
-        rcfile.write("\n".join(lines) + "\n")
-        rcfile.close()
-        return [shell, "--rcfile", rcfile.name]
-
-    # zsh and other shells: fall back to exec-based approach
     commands.append(f"exec {shlex.quote(shell)}")
     return [shell, "-c", "; ".join(commands)]
 
@@ -485,30 +416,15 @@ def rename_tmux_window(name: str) -> None:
 def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     """Prepare a project environment for execution.
 
-    Loads config, mounts encrypted volumes, renames tmux window,
-    and returns everything needed to exec into the project shell.
+    Loads config, renames tmux window, and returns everything needed
+    to exec into the project shell.
     """
     config = load_config(name)
-
-    # Handle legacy flat file projects
-    if config.get("_legacy"):
-        legacy_path = config["_path"]
-        shell = os.environ.get("SHELL", "/bin/bash")
-        rename_tmux_window(name)
-        cmd = f"source {shlex.quote(str(legacy_path))}; exec {shlex.quote(shell)}"
-        return ProjectExec(
-            display_name=name,
-            program=shell,
-            argv=[shell, "-c", cmd],
-            is_legacy=True,
-        )
 
     # Extract config sections
     project_cfg = config.get("project", {})
     sandbox_cfg = config.get("sandbox", {})
-    env_cfg = config.get("env", {})
-    encrypted_cfg = config.get("encrypted", {})
-    venv_cfg = config.get("venv", {})
+    secrets_cfg = config.get("secrets", {})
     config_dir: Path = config["_config_dir"]
 
     # Resolve settings
@@ -522,16 +438,47 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     if not project_dir.exists():
         raise SystemExit(f"Project directory does not exist: {project_dir}")
 
+    # Secrets require sandbox (decrypted into sandbox tmpfs)
+    if secrets_cfg and not sandbox_enabled:
+        raise SystemExit(
+            "[secrets] requires sandbox to be enabled "
+            "(secrets are decrypted into sandbox tmpfs)"
+        )
+
+    # Resolve secrets paths
+    resolved_secrets: ResolvedSecrets | None = None
+    ro_bind_extra: list[Path] = []
+    if secrets_cfg:
+        require_dep("age")
+
+        archive_raw = secrets_cfg["archive"]
+        archive_path = expand_path(archive_raw)
+        if not archive_path.is_absolute():
+            archive_path = config_dir / archive_raw
+        if not archive_path.is_file():
+            raise SystemExit(f"Secrets archive not found: {archive_path}")
+
+        identity_path = expand_path(secrets_cfg["identity"])
+        if not identity_path.is_file():
+            raise SystemExit(f"Secrets identity file not found: {identity_path}")
+
+        dest = secrets_cfg.get("dest", "/tmp/pwrap-secrets")
+
+        resolved_secrets = ResolvedSecrets(
+            archive=archive_path.resolve(),
+            identity=identity_path.resolve(),
+            dest=dest,
+        )
+        ro_bind_extra = [resolved_secrets.archive, resolved_secrets.identity]
+
     # Rename tmux window
     rename_tmux_window(display_name)
 
-    # Mount encrypted volumes (outside sandbox, before anything else)
-    if encrypted_cfg:
-        mount_encrypted(encrypted_cfg, verbose=verbose)
-
     # Resolve init script and build shell argv
     init_script = get_init_script(config_dir, shell)
-    shell_argv = build_shell_argv(project_dir, config_dir, shell, venv_cfg)
+    shell_argv = build_shell_argv(
+        project_dir, config_dir, shell, secrets=resolved_secrets
+    )
 
     # Non-sandboxed execution
     if not sandbox_enabled:
@@ -539,13 +486,15 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
             display_name=display_name,
             program=shell,
             argv=shell_argv,
-            env_updates=env_cfg,
         )
 
     # Sandboxed execution - verify bwrap is available
     require_dep("bwrap")
 
-    bwrap_args = build_bwrap_args(sandbox_cfg, env_cfg, project_dir, init_script=init_script)
+    bwrap_args = build_bwrap_args(
+        sandbox_cfg, project_dir,
+        init_script=init_script, ro_bind_extra=ro_bind_extra,
+    )
     bwrap_args.extend(shell_argv)
 
     verbose_info = None
@@ -569,74 +518,70 @@ def run_project(name: str, verbose: bool = False) -> None:
     result = prepare_project(name, verbose)
 
     label = result.display_name
-    if result.is_legacy:
-        label += " (legacy)"
-    elif result.is_sandboxed:
+    if result.is_sandboxed:
         label += " (sandboxed)"
     print(f"Loading {label}")
 
     if result.verbose_info:
         print(result.verbose_info)
 
-    for key, value in result.env_updates.items():
-        os.environ[key] = os.path.expanduser(value)
-
     os.execvp(result.program, result.argv)
 
 
-def create_project(name: str, project_dir: str, sandbox: bool = True) -> Path:
-    """Create a new project config directory with a default project.toml.
+def _load_template(name: str) -> str:
+    """Load a template file from the package templates directory."""
+    from importlib.resources import files
+
+    return (files("project_wrap") / "templates" / name).read_text()
+
+
+def create_project(
+    project_dir: str,
+    name: str | None = None,
+    sandbox: bool = True,
+    shell: str | None = None,
+) -> Path:
+    """Create a new project config directory with templates.
+
+    Args:
+        project_dir: Path to the project working directory.
+        name: Project name. Defaults to the directory basename.
+        sandbox: Whether to enable sandbox in the generated config.
+        shell: Shell path. Defaults to $SHELL.
 
     Returns the path to the created config directory.
     """
+    resolved_dir = expand_path(project_dir).resolve()
+    if not resolved_dir.is_dir():
+        raise SystemExit(f"Project directory does not exist: {resolved_dir}")
+
+    if name is None:
+        name = resolved_dir.name
+
+    if shell is None:
+        shell = os.environ.get("SHELL", "/bin/bash")
+
     validate_project_name(name)
     config_dir = get_config_dir() / name
 
     if config_dir.exists():
         raise SystemExit(f"Project already exists: {config_dir}")
 
-    resolved_dir = expand_path(project_dir).resolve()
-    if not resolved_dir.is_dir():
-        raise SystemExit(f"Project directory does not exist: {resolved_dir}")
-
     sandbox_enabled = "true" if sandbox else "false"
 
-    toml = f"""\
-[project]
-name = "{name}"
-dir = "{resolved_dir}"
-# shell = "/usr/bin/fish"         # Defaults to $SHELL
-
-[sandbox]
-enabled = {sandbox_enabled}
-# blacklist = [                   # Paths to hide (overlaid with tmpfs)
-#     "~/.config/project",
-#     "~/.kube",
-#     "~/.aws",
-#     "~/.ssh",
-# ]
-# whitelist = [                   # Exceptions to blacklist (bound back)
-#     "~/.kube/{name}",
-# ]
-# writable = [                    # Extra writable paths (home is read-only)
-#     "~/.pyenv/shims",
-# ]
-# unshare_net = false             # Isolate network namespace
-# unshare_pid = true              # Isolate PID namespace (default: true)
-# new_session = true              # TIOCSTI protection (auto on kernels < 6.2)
-
-# [env]                           # Environment variables
-# KUBECONFIG = "~/.kube/{name}/config"
-
-# [encrypted]                     # gocryptfs volumes (source = mountpoint)
-# "~/.secrets-encrypted/{name}" = "~/.secrets/{name}"
-
-# [venv]
-# path = ".venv"                  # Relative to project dir, auto-activated
-"""
+    toml = _load_template("project.toml").format(
+        name=name, dir=resolved_dir, sandbox_enabled=sandbox_enabled, shell=shell
+    )
 
     config_dir.mkdir(parents=True)
     (config_dir / "project.toml").write_text(toml)
+
+    # Copy matching init template
+    shell_name = Path(shell).name
+    if shell_name == "fish":
+        (config_dir / "init.fish").write_text(_load_template("init.fish"))
+    else:
+        (config_dir / "init.sh").write_text(_load_template("init.sh"))
 
     return config_dir
 
@@ -678,36 +623,5 @@ def list_projects() -> None:
                     print(f"  {item.name}/ (invalid config)")
             else:
                 print(f"  {item.name}/ (missing project.toml)")
-        else:
-            print(f"  {item.name} (legacy)")
 
 
-def unmount_project(name: str) -> None:
-    """Unmount encrypted volumes for a project."""
-    config = load_config(name)
-
-    if config.get("_legacy"):
-        print("Legacy projects don't have encrypted volumes")
-        return
-
-    encrypted_cfg = config.get("encrypted", {})
-
-    if not encrypted_cfg:
-        print(f"No encrypted volumes configured for {name}")
-        return
-
-    require_dep("fusermount")
-
-    for dst in encrypted_cfg.values():
-        dst_path = expand_path(dst)
-
-        result = subprocess.run(
-            ["mountpoint", "-q", str(dst_path)],
-            capture_output=True,
-        )
-
-        if result.returncode == 0:
-            print(f"Unmounting: {dst_path}")
-            subprocess.run(["fusermount", "-u", str(dst_path)])
-        else:
-            print(f"Not mounted: {dst_path}")

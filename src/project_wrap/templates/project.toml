@@ -1,0 +1,27 @@
+[project]
+name = "{name}"
+dir = "{dir}"
+shell = "{shell}"
+
+[sandbox]
+enabled = {sandbox_enabled}
+# Note: the config directory (~/.config/project) is always blacklisted automatically.
+# blacklist = [                   # Additional paths to hide (overlaid with tmpfs)
+#     "~/.kube",
+#     "~/.aws",
+#     "~/.ssh",
+# ]
+# whitelist = [                   # Exceptions to blacklist (bound back)
+#     "~/.kube/{name}",
+# ]
+# writable = [                    # Extra writable paths (home is read-only)
+#     "~/.pyenv/shims",
+# ]
+# unshare_net = false             # Isolate network namespace
+# unshare_pid = true              # Isolate PID namespace (default: true)
+# new_session = true              # TIOCSTI protection (auto on kernels < 6.2)
+
+# [secrets]                        # age-encrypted archive (sandbox only)
+# archive = "secrets.tar.age"     # Relative to config dir, or absolute
+# identity = "~/.age/key.txt"     # age identity file
+# dest = "/tmp/pwrap-secrets"     # Decrypted into sandbox tmpfs

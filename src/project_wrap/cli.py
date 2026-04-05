@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from . import __version__
-from .core import create_project, list_projects, run_project, unmount_project
+from .core import create_project, list_projects, run_project
 from .deps import check_optional_deps
 
 
@@ -32,10 +32,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable sandbox in generated config (use with --new)",
     )
     parser.add_argument(
-        "-u",
-        "--unmount",
-        action="store_true",
-        help="Unmount encrypted volumes for project",
+        "--shell",
+        metavar="SHELL",
+        help="Shell to configure (use with --new, defaults to $SHELL)",
     )
     parser.add_argument(
         "-l",
@@ -68,21 +67,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.new:
-            if not args.project:
-                print("Error: --new requires a project name", file=sys.stderr)
-                return 1
             config_path = create_project(
-                args.project, args.new, sandbox=not args.no_sandbox
+                args.new,
+                name=args.project or None,
+                sandbox=not args.no_sandbox,
+                shell=args.shell,
             )
-            print(f"Created {config_path / 'project.toml'}")
+            print(f"Created {config_path}")
             return 0
 
         if args.list or not args.project:
             list_projects()
-            return 0
-
-        if args.unmount:
-            unmount_project(args.project)
             return 0
 
         run_project(args.project, verbose=args.verbose)
