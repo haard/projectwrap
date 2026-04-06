@@ -13,6 +13,7 @@ from project_wrap.core import (
     build_shell_argv,
     check_config_permissions,
     create_project,
+    ensure_templates,
     expand_path,
     get_config_dir,
     get_init_script,
@@ -44,12 +45,12 @@ class TestGetConfigDir:
     def test_default_config_dir(self, monkeypatch):
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
         result = get_config_dir()
-        assert result == Path.home() / ".config" / "project"
+        assert result == Path.home() / ".config" / "pwrap"
 
     def test_xdg_config_dir(self, monkeypatch):
         monkeypatch.setenv("XDG_CONFIG_HOME", "/custom/config")
         result = get_config_dir()
-        assert result == Path("/custom/config/project")
+        assert result == Path("/custom/config/pwrap")
 
 
 class TestLoadConfig:
@@ -1036,3 +1037,148 @@ identity = "{tmp_path / 'nonexistent_key.txt'}"
     def test_secrets_schema_rejects_unknown_key(self):
         with pytest.raises(SystemExit, match="unknown keys"):
             validate_config({"secrets": {"archive": "x", "bogus": "y"}})
+
+    def test_writeback_fish_trap(self, tmp_path):
+        secrets = ResolvedSecrets(
+            archive=tmp_path / "secrets.tar.age",
+            identity=tmp_path / "key.txt",
+            dest="/tmp/pwrap-secrets",
+            writeback=True,
+        )
+
+        result = build_shell_argv(
+            project_dir=tmp_path / "project",
+            config_dir=tmp_path / "config",
+            shell="/usr/bin/fish",
+            secrets=secrets,
+        )
+
+        init_cmd = result[2]
+        assert "__pwrap_writeback" in init_cmd
+        assert "fish_exit" in init_cmd
+        assert "PWRAP_SECRETS_DEST" in init_cmd
+
+    def test_writeback_bash_trap(self, tmp_path):
+        secrets = ResolvedSecrets(
+            archive=tmp_path / "secrets.tar.age",
+            identity=tmp_path / "key.txt",
+            dest="/tmp/pwrap-secrets",
+            writeback=True,
+        )
+
+        result = build_shell_argv(
+            project_dir=tmp_path / "project",
+            config_dir=tmp_path / "config",
+            shell="/bin/bash",
+            secrets=secrets,
+        )
+
+        init_cmd = result[2]
+        assert "trap " in init_cmd
+        assert "EXIT" in init_cmd
+        assert "PWRAP_SECRETS_DEST" in init_cmd
+
+    def test_no_writeback_no_trap(self, tmp_path):
+        secrets = ResolvedSecrets(
+            archive=tmp_path / "secrets.tar.age",
+            identity=tmp_path / "key.txt",
+            dest="/tmp/pwrap-secrets",
+            writeback=False,
+        )
+
+        result = build_shell_argv(
+            project_dir=tmp_path / "project",
+            config_dir=tmp_path / "config",
+            shell="/usr/bin/fish",
+            secrets=secrets,
+        )
+
+        assert "trap '" not in result[2]
+        assert "__pwrap_writeback" not in result[2]
+
+    def test_writeback_schema_valid(self):
+        validate_config({
+            "secrets": {
+                "archive": "test.tar.age",
+                "identity": "~/.age/key.txt",
+                "dest": "/tmp/secrets",
+                "writeback": True,
+            },
+        })
+
+
+class TestBwrapRwBindExtra:
+    """Tests for rw_bind_extra parameter in build_bwrap_args."""
+
+    def test_rw_binds_extra_paths(self, tmp_path):
+        extra = tmp_path / "archive.age"
+        extra.write_text("encrypted")
+
+        result = build_bwrap_args({}, tmp_path, rw_bind_extra=[extra])
+
+        idx = result.index(str(extra))
+        assert result[idx - 1] == "--bind"
+        assert result[idx + 1] == str(extra)
+
+
+class TestBwrapSetenvExtra:
+    """Tests for setenv_extra parameter in build_bwrap_args."""
+
+    def test_sets_extra_env_vars(self, tmp_path):
+        result = build_bwrap_args(
+            {}, tmp_path,
+            setenv_extra={"PWRAP_SECRETS_DEST": "/tmp/secrets", "FOO": "bar"},
+        )
+
+        idx = result.index("PWRAP_SECRETS_DEST")
+        assert result[idx - 1] == "--setenv"
+        assert result[idx + 1] == "/tmp/secrets"
+
+        idx2 = result.index("FOO")
+        assert result[idx2 - 1] == "--setenv"
+        assert result[idx2 + 1] == "bar"
+
+
+class TestEnsureTemplates:
+    """Tests for user-editable template management."""
+
+    def test_creates_templates_on_first_run(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("project_wrap.core.get_config_dir", lambda: tmp_path)
+
+        created = ensure_templates()
+
+        assert created is True
+        assert (tmp_path / "project.tpl.toml").exists()
+        assert (tmp_path / "init.tpl.fish").exists()
+        assert (tmp_path / "init.tpl.sh").exists()
+
+    def test_returns_false_when_templates_exist(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("project_wrap.core.get_config_dir", lambda: tmp_path)
+        (tmp_path / "project.tpl.toml").write_text("[project]")
+
+        created = ensure_templates()
+
+        assert created is False
+
+    def test_create_project_uses_user_template(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        project_dir = tmp_path / "work"
+        project_dir.mkdir()
+
+        # Write a custom user template
+        (config_dir / "project.tpl.toml").write_text(
+            '[project]\nname = "{name}"\ndir = "{dir}"\nshell = "{shell}"\n'
+            "\n[sandbox]\nenabled = {sandbox_enabled}\ncustom = true\n"
+        )
+        (config_dir / "init.tpl.fish").write_text("# my custom fish init")
+
+        monkeypatch.setattr("project_wrap.core.get_config_dir", lambda: config_dir)
+
+        result = create_project(str(project_dir), name="myproj", shell="/usr/bin/fish")
+
+        content = (result / "project.toml").read_text()
+        assert "custom = true" in content
+
+        init_content = (result / "init.fish").read_text()
+        assert "my custom fish init" in init_content

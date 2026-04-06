@@ -4,7 +4,7 @@
 
 _pwrap_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
-    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/project"
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/pwrap"
 
     # Options
     if [[ ${cur} == -* ]]; then

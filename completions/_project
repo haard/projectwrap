@@ -4,7 +4,7 @@
 #      or: add completions dir to fpath in .zshrc
 
 _pwrap() {
-    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/project"
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/pwrap"
     local -a projects
 
     if [[ -d "${config_dir}" ]]; then

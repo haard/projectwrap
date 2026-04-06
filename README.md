@@ -43,7 +43,7 @@ pwrap --check-deps
 pwrap --new ~/projects/myproject
 ```
 
-2. Edit `~/.config/project/myproject/project.toml` to configure sandboxing, and
+2. Edit `~/.config/pwrap/myproject/project.toml` to configure sandboxing, and
    `init.fish`/`init.sh` for environment setup.
 
 3. Launch the project:
@@ -56,7 +56,7 @@ pwrap myproject
 ### Directory Structure
 
 ```
-~/.config/project/
+~/.config/pwrap/
 ├── myproject/
 │   ├── project.toml      # Required: project configuration
 │   ├── init.fish         # Optional: runs inside sandbox (fish)
@@ -77,7 +77,7 @@ shell = "/usr/bin/fish"         # Optional, defaults to $SHELL
 [sandbox]
 enabled = true                  # Enable bubblewrap isolation
 blacklist = [                   # Paths to hide (overlaid with tmpfs)
-    "~/.config/project",
+    "~/.config/pwrap",
     "~/.kube",
     "~/.aws",
     "~/.ssh",
@@ -99,6 +99,7 @@ unshare_pid = true              # Isolate PID namespace (default: true)
 archive = "secrets.tar.age"     # Relative to config dir, or absolute
 identity = "~/.age/key.txt"     # age identity file
 dest = "/tmp/secrets"           # Decrypted into sandbox tmpfs (default: /tmp/pwrap-secrets)
+writeback = true                # Re-encrypt on exit + pwrap --writeback
 
 ```
 
@@ -123,28 +124,71 @@ alias dj "python manage.py"
 
 ### Secrets
 
-The `[secrets]` section decrypts an age-encrypted tar archive into the sandbox's `/tmp`
-(tmpfs). Secrets live only in RAM, are visible only inside the sandbox, and are
-automatically cleaned up when the shell exits. Requires `sandbox.enabled = true`.
+The `[secrets]` section decrypts an [age](https://age-encryption.org/)-encrypted tar
+archive into the sandbox's `/tmp` (tmpfs). Secrets live only in RAM, are visible only
+inside the sandbox, and are automatically cleaned up when the shell exits. Requires
+`sandbox.enabled = true`.
 
-Create an encrypted archive:
+With `writeback = true`, secrets are re-encrypted back to the archive on shell exit.
+You can also checkpoint manually with `pwrap --writeback`.
+
+#### Example: Encrypting Claude Code history
+
+You want to run Claude Code inside a sandboxed project, but keep the chat history
+encrypted at rest so it's only accessible inside the sandbox.
+
+**1. Generate an age key:**
 ```bash
-# Generate an age key (once)
 age-keygen -o ~/.age/key.txt
-
-# Create and encrypt a secrets archive
-tar cf - kubeconfig.yaml .env | age -e -R ~/.age/key.txt.pub > secrets.tar.age
-
-# Place it in your project config dir
-mv secrets.tar.age ~/.config/project/myproject/
 ```
 
-Configure in `project.toml`:
+**2. Create the initial encrypted archive from an existing folder:**
+```bash
+tar c -C ~/.claude-secretproject . | \
+    age -e -i ~/.age/key.txt -o ~/.config/pwrap/secretproject/claude.tar.age
+```
+
+(If starting fresh, create an empty archive: `tar c --files-from /dev/null | age -e ...`)
+
+**3. Configure the project** (`~/.config/pwrap/secretproject/project.toml`):
 ```toml
+[project]
+name = "secretproject"
+dir = "~/projects/secretproject"
+shell = "/usr/bin/fish"
+
+[sandbox]
+enabled = true
+writable = ["~/.claude-secretproject"]
+
 [secrets]
-archive = "secrets.tar.age"      # Relative to config dir
+archive = "claude.tar.age"
 identity = "~/.age/key.txt"
-dest = "/tmp/secrets"            # Optional, default: /tmp/pwrap-secrets
+dest = "~/.claude-secretproject"
+writeback = true
+```
+
+Note: `dest` is where the decrypted files appear. It must be writable inside the
+sandbox (listed in `writable` or under the project dir). Your init script must set
+`CLAUDE_CONFIG_DIR` so Claude Code uses the decrypted location:
+
+```fish
+# init.fish
+set -gx CLAUDE_CONFIG_DIR ~/.claude-secretproject
+```
+
+**4. Launch the project:**
+```bash
+pwrap secretproject
+```
+
+On entry, the archive is decrypted into `~/.claude-secretproject`. Claude Code runs
+normally. On exit, the contents are re-encrypted back to `claude.tar.age`. Between
+sessions, only the encrypted archive exists on disk.
+
+**5. Checkpoint during a session** (optional):
+```bash
+pwrap --writeback
 ```
 
 ## Usage
@@ -167,6 +211,9 @@ pwrap --new ~/projects/myproject my-custom-name
 
 # Create without sandbox
 pwrap --new ~/projects/myproject --no-sandbox
+
+# Checkpoint secrets (re-encrypt, run inside sandbox)
+pwrap --writeback
 
 # Check optional dependencies
 pwrap --check-deps

@@ -2,7 +2,7 @@
 # Install: cp completions/project.fish ~/.config/fish/completions/pwrap.fish
 
 function __pwrap_list
-    set -l config_dir ~/.config/project
+    set -l config_dir ~/.config/pwrap
     if test -d $config_dir
         for item in $config_dir/*
             if test -d $item; or test -f $item

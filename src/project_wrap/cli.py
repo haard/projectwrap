@@ -6,7 +6,14 @@ import argparse
 import sys
 
 from . import __version__
-from .core import create_project, list_projects, run_project
+from .core import (
+    create_project,
+    ensure_templates,
+    get_config_dir,
+    list_projects,
+    run_project,
+    writeback_secrets,
+)
 from .deps import check_optional_deps
 
 
@@ -37,6 +44,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Shell to configure (use with --new, defaults to $SHELL)",
     )
     parser.add_argument(
+        "--writeback",
+        action="store_true",
+        help="Re-encrypt secrets (checkpoint, run inside sandbox)",
+    )
+    parser.add_argument(
         "-l",
         "--list",
         action="store_true",
@@ -62,11 +74,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.writeback:
+            writeback_secrets()
+            return 0
+
         if args.check_deps:
             check_optional_deps(verbose=True)
             return 0
 
         if args.new:
+            if ensure_templates():
+                config_dir = get_config_dir()
+                print("Templates created:")
+                for name in ["project.tpl.toml", "init.tpl.fish", "init.tpl.sh"]:
+                    print(f"  {config_dir / name}")
+                print("Edit these templates, then run pwrap --new again.")
+                return 0
+
+            print(f"Using template {get_config_dir() / 'project.tpl.toml'}")
             config_path = create_project(
                 args.new,
                 name=args.project or None,

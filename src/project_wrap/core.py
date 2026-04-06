@@ -34,7 +34,7 @@ def get_config_dir() -> Path:
         base = Path(xdg_config)
     else:
         base = Path.home() / ".config"
-    return base / "project"
+    return base / "pwrap"
 
 
 def expand_path(path: str) -> Path:
@@ -114,7 +114,7 @@ _SCHEMA: dict[str, dict[str, type]] = {
         "new_session": bool,
         "writable": list,
     },
-    "secrets": {"archive": str, "identity": str, "dest": str},
+    "secrets": {"archive": str, "identity": str, "dest": str, "writeback": bool},
 }
 
 
@@ -186,6 +186,8 @@ def build_bwrap_args(
     project_dir: Path,
     init_script: Path | None = None,
     ro_bind_extra: list[Path] | None = None,
+    rw_bind_extra: list[Path] | None = None,
+    setenv_extra: dict[str, str] | None = None,
 ) -> list[str]:
     """Build bubblewrap command arguments.
 
@@ -194,6 +196,8 @@ def build_bwrap_args(
         project_dir: Project working directory
         init_script: Optional init script to bind-mount read-only into sandbox
         ro_bind_extra: Additional paths to bind-mount read-only (e.g. secrets files)
+        rw_bind_extra: Additional paths to bind-mount read-write (e.g. writeback archive)
+        setenv_extra: Additional environment variables to set inside sandbox
 
     Returns:
         List of bwrap arguments
@@ -273,9 +277,13 @@ def build_bwrap_args(
     if init_script is not None:
         args.extend(["--ro-bind", str(init_script), str(init_script)])
 
-    # Bind-mount extra read-only paths (e.g. secrets archive + identity)
+    # Bind-mount extra read-only paths (e.g. secrets identity file)
     for path in ro_bind_extra or []:
         args.extend(["--ro-bind", str(path), str(path)])
+
+    # Bind-mount extra read-write paths (e.g. writeback archive)
+    for path in rw_bind_extra or []:
+        args.extend(["--bind", str(path), str(path)])
 
     # TIOCSTI protection (--new-session breaks fish TTY, so only enable when needed)
     vulnerable = _tiocsti_vulnerable()
@@ -305,6 +313,8 @@ def build_bwrap_args(
 
     # Set environment variables
     args.extend(["--setenv", "PROJECT_WRAP", "1"])
+    for key, value in (setenv_extra or {}).items():
+        args.extend(["--setenv", key, value])
 
     # Set working directory
     args.extend(["--chdir", str(project_dir)])
@@ -338,6 +348,7 @@ class ResolvedSecrets:
     archive: Path
     identity: Path
     dest: str
+    writeback: bool = False
 
 
 def _build_init_commands(
@@ -359,6 +370,20 @@ def _build_init_commands(
         identity = shlex.quote(str(secrets.identity))
         commands.append(f"mkdir -p {dest}")
         commands.append(f"age -d -i {identity} {archive} | tar x -C {dest}")
+
+        # Writeback: re-encrypt on shell exit
+        if secrets.writeback:
+            shell_name = Path(shell).name
+            wb_cmd = (
+                'tar c -C "$PWRAP_SECRETS_DEST" . | '
+                'age -e -i "$PWRAP_SECRETS_IDENTITY" -o "$PWRAP_SECRETS_ARCHIVE"'
+            )
+            if shell_name == "fish":
+                commands.append(
+                    f"function __pwrap_writeback --on-event fish_exit; {wb_cmd}; end"
+                )
+            else:
+                commands.append(f"trap '{wb_cmd}' EXIT")
 
     commands.append(f"cd {shlex.quote(str(project_dir))}")
 
@@ -448,6 +473,8 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     # Resolve secrets paths
     resolved_secrets: ResolvedSecrets | None = None
     ro_bind_extra: list[Path] = []
+    rw_bind_extra: list[Path] = []
+    setenv_extra: dict[str, str] = {}
     if secrets_cfg:
         require_dep("age")
 
@@ -463,13 +490,25 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
             raise SystemExit(f"Secrets identity file not found: {identity_path}")
 
         dest = secrets_cfg.get("dest", "/tmp/pwrap-secrets")
+        writeback = secrets_cfg.get("writeback", False)
+
+        ro_bind_extra = [identity_path.resolve()]
+        if writeback:
+            rw_bind_extra = [archive_path.resolve()]
+            setenv_extra = {
+                "PWRAP_SECRETS_DEST": dest,
+                "PWRAP_SECRETS_ARCHIVE": str(archive_path.resolve()),
+                "PWRAP_SECRETS_IDENTITY": str(identity_path.resolve()),
+            }
+        else:
+            ro_bind_extra.append(archive_path.resolve())
 
         resolved_secrets = ResolvedSecrets(
             archive=archive_path.resolve(),
             identity=identity_path.resolve(),
             dest=dest,
+            writeback=writeback,
         )
-        ro_bind_extra = [resolved_secrets.archive, resolved_secrets.identity]
 
     # Rename tmux window
     rename_tmux_window(display_name)
@@ -494,6 +533,7 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     bwrap_args = build_bwrap_args(
         sandbox_cfg, project_dir,
         init_script=init_script, ro_bind_extra=ro_bind_extra,
+        rw_bind_extra=rw_bind_extra, setenv_extra=setenv_extra,
     )
     bwrap_args.extend(shell_argv)
 
@@ -528,11 +568,72 @@ def run_project(name: str, verbose: bool = False) -> None:
     os.execvp(result.program, result.argv)
 
 
-def _load_template(name: str) -> str:
+def writeback_secrets() -> None:
+    """Re-encrypt secrets dest back to the archive. Runs inside the sandbox."""
+    dest = os.environ.get("PWRAP_SECRETS_DEST")
+    archive = os.environ.get("PWRAP_SECRETS_ARCHIVE")
+    identity = os.environ.get("PWRAP_SECRETS_IDENTITY")
+
+    if not all([dest, archive, identity]):
+        raise SystemExit(
+            "Not in a writeback-enabled sandbox "
+            "(PWRAP_SECRETS_* environment variables not set)"
+        )
+
+    result = subprocess.run(
+        f'tar c -C {shlex.quote(dest)} . | '  # type: ignore[arg-type]
+        f'age -e -i {shlex.quote(identity)} -o {shlex.quote(archive)}',  # type: ignore[arg-type]
+        shell=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit("Writeback failed")
+    print(f"Secrets written back to {archive}")
+
+
+TEMPLATE_NAMES = ["project.tpl.toml", "init.tpl.fish", "init.tpl.sh"]
+
+
+def _load_package_template(name: str) -> str:
     """Load a template file from the package templates directory."""
     from importlib.resources import files
 
+    # Package templates use plain names (project.toml), user templates use .tpl. names
     return (files("project_wrap") / "templates" / name).read_text()
+
+
+def ensure_templates() -> bool:
+    """Ensure user-editable templates exist in the config directory.
+
+    On first run, copies package templates to ~/.config/pwrap/ with .tpl. names.
+    Returns True if templates were just created (caller should pause for editing).
+    """
+    config_dir = get_config_dir()
+    marker = config_dir / "project.tpl.toml"
+
+    if marker.exists():
+        return False
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    # Map .tpl. names to package template names
+    pkg_names = {"project.tpl.toml": "project.toml", "init.tpl.fish": "init.fish",
+                 "init.tpl.sh": "init.sh"}
+    for tpl_name, pkg_name in pkg_names.items():
+        (config_dir / tpl_name).write_text(_load_package_template(pkg_name))
+
+    return True
+
+
+def _load_template(name: str) -> str:
+    """Load a template, preferring user-editable version over package default.
+
+    Maps template names: project.toml -> project.tpl.toml, init.fish -> init.tpl.fish
+    """
+    tpl_name = name.replace(".", ".tpl.", 1)  # project.toml -> project.tpl.toml
+    user_tpl = get_config_dir() / tpl_name
+    if user_tpl.exists():
+        return user_tpl.read_text()
+    return _load_package_template(name)
 
 
 def create_project(

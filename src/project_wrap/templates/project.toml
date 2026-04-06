@@ -5,7 +5,7 @@ shell = "{shell}"
 
 [sandbox]
 enabled = {sandbox_enabled}
-# Note: the config directory (~/.config/project) is always blacklisted automatically.
+# Note: the config directory (~/.config/pwrap) is always blacklisted automatically.
 # blacklist = [                   # Additional paths to hide (overlaid with tmpfs)
 #     "~/.kube",
 #     "~/.aws",
@@ -25,3 +25,4 @@ enabled = {sandbox_enabled}
 # archive = "secrets.tar.age"     # Relative to config dir, or absolute
 # identity = "~/.age/key.txt"     # age identity file
 # dest = "/tmp/pwrap-secrets"     # Decrypted into sandbox tmpfs
+# writeback = true                # Re-encrypt on exit + pwrap --writeback
