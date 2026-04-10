@@ -8,7 +8,6 @@ import pytest
 import tomllib
 
 from project_wrap.core import (
-    ResolvedSecrets,
     build_bwrap_args,
     build_shell_argv,
     check_config_permissions,
@@ -135,22 +134,22 @@ class TestBuildBwrapArgs:
         assert "--new-session" in result
 
     def test_new_session_explicit_false(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("project_wrap.core._tiocsti_vulnerable", lambda: False)
+        monkeypatch.setattr("project_wrap.core.tiocsti_vulnerable", lambda: False)
         result = build_bwrap_args({"new_session": False}, tmp_path)
         assert "--new-session" not in result
 
     def test_new_session_auto_on_vulnerable(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("project_wrap.core._tiocsti_vulnerable", lambda: True)
+        monkeypatch.setattr("project_wrap.core.tiocsti_vulnerable", lambda: True)
         result = build_bwrap_args({}, tmp_path)
         assert "--new-session" in result
 
     def test_new_session_auto_off_safe_kernel(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("project_wrap.core._tiocsti_vulnerable", lambda: False)
+        monkeypatch.setattr("project_wrap.core.tiocsti_vulnerable", lambda: False)
         result = build_bwrap_args({}, tmp_path)
         assert "--new-session" not in result
 
     def test_new_session_false_vulnerable_warns(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setattr("project_wrap.core._tiocsti_vulnerable", lambda: True)
+        monkeypatch.setattr("project_wrap.core.tiocsti_vulnerable", lambda: True)
         build_bwrap_args({"new_session": False}, tmp_path)
         assert "TIOCSTI" in capsys.readouterr().err
 
@@ -503,10 +502,10 @@ class TestValidateConfig:
         validate_config({
             "project": {"name": "test", "dir": "~/test", "shell": "/bin/bash"},
             "sandbox": {"enabled": True, "blacklist": ["~/.aws"], "whitelist": []},
-            "secrets": {
-                "archive": "secrets.tar.age",
-                "identity": "~/.age/key.txt",
-                "dest": "/tmp/secrets",
+            "encrypted": {
+                "cipherdir": "encrypted",
+                "mountpoint": "~/.local/share/myapp",
+                "shared": False,
             },
         })
 
@@ -610,7 +609,7 @@ class TestValidateShell:
 
         fake_etc_shells = tmp_path / "shells"
         fake_etc_shells.write_text("/bin/bash\n/bin/sh\n")
-        monkeypatch.setattr("project_wrap.core.ETC_SHELLS", fake_etc_shells)
+        monkeypatch.setattr("project_wrap.validate.ETC_SHELLS", fake_etc_shells)
 
         with pytest.raises(SystemExit, match="not in /etc/shells"):
             validate_shell(str(fake_shell))
@@ -622,7 +621,7 @@ class TestValidateShell:
 
         fake_etc_shells = tmp_path / "shells"
         fake_etc_shells.write_text(f"{fake_shell}\n/bin/bash\n")
-        monkeypatch.setattr("project_wrap.core.ETC_SHELLS", fake_etc_shells)
+        monkeypatch.setattr("project_wrap.validate.ETC_SHELLS", fake_etc_shells)
 
         validate_shell(str(fake_shell))  # Should not raise
 
@@ -673,7 +672,7 @@ class TestPrepareProject:
 
         fake_etc = tmp_path / "shells"
         fake_etc.write_text(f"{fake_shell}\n")
-        monkeypatch.setattr("project_wrap.core.ETC_SHELLS", fake_etc)
+        monkeypatch.setattr("project_wrap.validate.ETC_SHELLS", fake_etc)
 
         _make_project_config(tmp_path, monkeypatch, f"""
 [project]
@@ -698,7 +697,7 @@ shell = "{fake_shell}"
 
         fake_etc = tmp_path / "shells"
         fake_etc.write_text(f"{fake_shell}\n")
-        monkeypatch.setattr("project_wrap.core.ETC_SHELLS", fake_etc)
+        monkeypatch.setattr("project_wrap.validate.ETC_SHELLS", fake_etc)
         monkeypatch.setattr("shutil.which", lambda x: "/usr/bin/bwrap")
 
         _make_project_config(tmp_path, monkeypatch, f"""
@@ -724,7 +723,7 @@ enabled = true
 
         fake_etc = tmp_path / "shells"
         fake_etc.write_text(f"{fake_shell}\n")
-        monkeypatch.setattr("project_wrap.core.ETC_SHELLS", fake_etc)
+        monkeypatch.setattr("project_wrap.validate.ETC_SHELLS", fake_etc)
 
         _make_project_config(tmp_path, monkeypatch, f"""
 [project]
@@ -894,59 +893,10 @@ class TestBwrapRoBindExtra:
         assert ro_bind_count == 2  # root + home only
 
 
-class TestSecrets:
-    """Tests for age-based secrets decryption."""
+class TestEncrypted:
+    """Tests for gocryptfs encrypted volume config."""
 
-    def test_init_commands_include_age_decrypt(self, tmp_path):
-        secrets = ResolvedSecrets(
-            archive=tmp_path / "secrets.tar.age",
-            identity=tmp_path / "key.txt",
-            dest="/tmp/pwrap-secrets",
-        )
-
-        result = build_shell_argv(
-            project_dir=tmp_path / "project",
-            config_dir=tmp_path / "config",
-            shell="/usr/bin/fish",
-            secrets=secrets,
-        )
-
-        init_cmd = result[2]
-        assert "age -d -i" in init_cmd
-        assert "tar x -C" in init_cmd
-        assert "/tmp/pwrap-secrets" in init_cmd
-        assert "mkdir -p" in init_cmd
-
-    def test_secrets_commands_before_cd(self, tmp_path):
-        secrets = ResolvedSecrets(
-            archive=tmp_path / "secrets.tar.age",
-            identity=tmp_path / "key.txt",
-            dest="/tmp/pwrap-secrets",
-        )
-
-        result = build_shell_argv(
-            project_dir=tmp_path / "project",
-            config_dir=tmp_path / "config",
-            shell="/usr/bin/fish",
-            secrets=secrets,
-        )
-
-        init_cmd = result[2]
-        age_pos = init_cmd.index("age")
-        cd_pos = init_cmd.index("cd ")
-        assert age_pos < cd_pos
-
-    def test_no_secrets_no_age_commands(self, tmp_path):
-        result = build_shell_argv(
-            project_dir=tmp_path / "project",
-            config_dir=tmp_path / "config",
-            shell="/usr/bin/fish",
-            secrets=None,
-        )
-
-        assert "age -d" not in result[2]
-
-    def test_secrets_without_sandbox_raises(self, tmp_path, monkeypatch):
+    def test_encrypted_without_sandbox_raises(self, tmp_path, monkeypatch):
         project_dir = tmp_path / "work"
         project_dir.mkdir()
 
@@ -956,24 +906,23 @@ class TestSecrets:
 
         fake_etc = tmp_path / "shells"
         fake_etc.write_text(f"{fake_shell}\n")
-        monkeypatch.setattr("project_wrap.core.ETC_SHELLS", fake_etc)
+        monkeypatch.setattr("project_wrap.validate.ETC_SHELLS", fake_etc)
 
-        archive = tmp_path / "config" / "testproj" / "secrets.tar.age"
-
-        _make_project_config(tmp_path, monkeypatch, f"""
+        _, conf_dir = _make_project_config(tmp_path, monkeypatch, f"""
 [project]
 dir = "{project_dir}"
 shell = "{fake_shell}"
 
-[secrets]
-archive = "{archive}"
-identity = "~/.age/key.txt"
+[encrypted]
+cipherdir = "{tmp_path / 'cipherdir'}"
+mountpoint = "/tmp/decrypted"
 """)
+        (tmp_path / "cipherdir").mkdir()
 
         with pytest.raises(SystemExit, match="requires sandbox to be enabled"):
             prepare_project("testproj")
 
-    def test_secrets_missing_archive_raises(self, tmp_path, monkeypatch):
+    def test_encrypted_missing_cipherdir_raises(self, tmp_path, monkeypatch):
         project_dir = tmp_path / "work"
         project_dir.mkdir()
 
@@ -983,7 +932,7 @@ identity = "~/.age/key.txt"
 
         fake_etc = tmp_path / "shells"
         fake_etc.write_text(f"{fake_shell}\n")
-        monkeypatch.setattr("project_wrap.core.ETC_SHELLS", fake_etc)
+        monkeypatch.setattr("project_wrap.validate.ETC_SHELLS", fake_etc)
         monkeypatch.setattr("shutil.which", lambda x: f"/usr/bin/{x}")
 
         _make_project_config(tmp_path, monkeypatch, f"""
@@ -994,149 +943,36 @@ shell = "{fake_shell}"
 [sandbox]
 enabled = true
 
-[secrets]
-archive = "nonexistent.tar.age"
-identity = "~/.age/key.txt"
+[encrypted]
+cipherdir = "{tmp_path / 'nonexistent'}"
+mountpoint = "/tmp/decrypted"
 """)
 
-        with pytest.raises(SystemExit, match="Secrets archive not found"):
+        with pytest.raises(SystemExit, match="cipherdir does not exist"):
             prepare_project("testproj")
 
-    def test_secrets_missing_identity_raises(self, tmp_path, monkeypatch):
-        project_dir = tmp_path / "work"
-        project_dir.mkdir()
-
-        fake_shell = tmp_path / "shell"
-        fake_shell.write_text("#!/bin/sh")
-        fake_shell.chmod(0o755)
-
-        fake_etc = tmp_path / "shells"
-        fake_etc.write_text(f"{fake_shell}\n")
-        monkeypatch.setattr("project_wrap.core.ETC_SHELLS", fake_etc)
-        monkeypatch.setattr("shutil.which", lambda x: f"/usr/bin/{x}")
-
-        config_dir, conf_dir = _make_project_config(tmp_path, monkeypatch, f"""
-[project]
-dir = "{project_dir}"
-shell = "{fake_shell}"
-
-[sandbox]
-enabled = true
-
-[secrets]
-archive = "secrets.tar.age"
-identity = "{tmp_path / 'nonexistent_key.txt'}"
-""")
-
-        # Create the archive so we get past that check
-        (conf_dir / "secrets.tar.age").write_text("encrypted")
-
-        with pytest.raises(SystemExit, match="Secrets identity file not found"):
-            prepare_project("testproj")
-
-    def test_secrets_schema_rejects_unknown_key(self):
+    def test_encrypted_schema_rejects_unknown_key(self):
         with pytest.raises(SystemExit, match="unknown keys"):
-            validate_config({"secrets": {"archive": "x", "bogus": "y"}})
+            validate_config({"encrypted": {"cipherdir": "x", "bogus": "y"}})
 
-    def test_writeback_fish_trap(self, tmp_path):
-        secrets = ResolvedSecrets(
-            archive=tmp_path / "secrets.tar.age",
-            identity=tmp_path / "key.txt",
-            dest="/tmp/pwrap-secrets",
-            writeback=True,
-        )
-
-        result = build_shell_argv(
-            project_dir=tmp_path / "project",
-            config_dir=tmp_path / "config",
-            shell="/usr/bin/fish",
-            secrets=secrets,
-        )
-
-        init_cmd = result[2]
-        assert "__pwrap_writeback" in init_cmd
-        assert "fish_exit" in init_cmd
-        assert "PWRAP_SECRETS_DEST" in init_cmd
-
-    def test_writeback_bash_trap(self, tmp_path):
-        secrets = ResolvedSecrets(
-            archive=tmp_path / "secrets.tar.age",
-            identity=tmp_path / "key.txt",
-            dest="/tmp/pwrap-secrets",
-            writeback=True,
-        )
-
-        result = build_shell_argv(
-            project_dir=tmp_path / "project",
-            config_dir=tmp_path / "config",
-            shell="/bin/bash",
-            secrets=secrets,
-        )
-
-        init_cmd = result[2]
-        assert "trap " in init_cmd
-        assert "EXIT" in init_cmd
-        assert "PWRAP_SECRETS_DEST" in init_cmd
-
-    def test_no_writeback_no_trap(self, tmp_path):
-        secrets = ResolvedSecrets(
-            archive=tmp_path / "secrets.tar.age",
-            identity=tmp_path / "key.txt",
-            dest="/tmp/pwrap-secrets",
-            writeback=False,
-        )
-
-        result = build_shell_argv(
-            project_dir=tmp_path / "project",
-            config_dir=tmp_path / "config",
-            shell="/usr/bin/fish",
-            secrets=secrets,
-        )
-
-        assert "trap '" not in result[2]
-        assert "__pwrap_writeback" not in result[2]
-
-    def test_writeback_schema_valid(self):
+    def test_encrypted_schema_valid(self):
         validate_config({
-            "secrets": {
-                "archive": "test.tar.age",
-                "identity": "~/.age/key.txt",
-                "dest": "/tmp/secrets",
-                "writeback": True,
+            "encrypted": {
+                "cipherdir": "encrypted",
+                "mountpoint": "~/.local/share/myapp",
+                "shared": False,
             },
         })
 
-
-class TestBwrapRwBindExtra:
-    """Tests for rw_bind_extra parameter in build_bwrap_args."""
-
-    def test_rw_binds_extra_paths(self, tmp_path):
-        extra = tmp_path / "archive.age"
-        extra.write_text("encrypted")
+    def test_rw_bind_extra(self, tmp_path):
+        extra = tmp_path / "mountpoint"
+        extra.mkdir()
 
         result = build_bwrap_args({}, tmp_path, rw_bind_extra=[extra])
 
         idx = result.index(str(extra))
         assert result[idx - 1] == "--bind"
         assert result[idx + 1] == str(extra)
-
-
-class TestBwrapSetenvExtra:
-    """Tests for setenv_extra parameter in build_bwrap_args."""
-
-    def test_sets_extra_env_vars(self, tmp_path):
-        result = build_bwrap_args(
-            {}, tmp_path,
-            setenv_extra={"PWRAP_SECRETS_DEST": "/tmp/secrets", "FOO": "bar"},
-        )
-
-        idx = result.index("PWRAP_SECRETS_DEST")
-        assert result[idx - 1] == "--setenv"
-        assert result[idx + 1] == "/tmp/secrets"
-
-        idx2 = result.index("FOO")
-        assert result[idx2 - 1] == "--setenv"
-        assert result[idx2 + 1] == "bar"
 
 
 class TestEnsureTemplates:

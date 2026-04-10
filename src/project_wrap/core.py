@@ -5,14 +5,21 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .deps import require_dep
-
-ETC_SHELLS = Path("/etc/shells")
+from .validate import (
+    check_config_permissions,
+    tiocsti_vulnerable,
+    validate_config,
+    validate_project_name,
+    validate_shell,
+)
+from .vault import VaultConfig
 
 
 @dataclass
@@ -24,6 +31,7 @@ class ProjectExec:
     argv: list[str]
     is_sandboxed: bool = False
     verbose_info: str | None = None
+    vault_config: VaultConfig | None = None
 
 
 def get_config_dir() -> Path:
@@ -41,120 +49,6 @@ def expand_path(path: str) -> Path:
     """Expand ~ and environment variables in path."""
     return Path(os.path.expandvars(os.path.expanduser(path)))
 
-
-def validate_project_name(name: str) -> None:
-    """Validate project name to prevent path traversal and injection."""
-    if not name or not name.strip():
-        raise SystemExit("Invalid project name: name cannot be empty")
-    if name == ".":
-        raise SystemExit("Invalid project name: '.'")
-    if "/" in name:
-        raise SystemExit(f"Invalid project name: {name!r} (contains '/')")
-    if ".." in name:
-        raise SystemExit(f"Invalid project name: {name!r} (contains '..')")
-    if "\x00" in name:
-        raise SystemExit("Invalid project name: name contains null byte")
-    if name.startswith("-"):
-        raise SystemExit(f"Invalid project name: {name!r} (starts with '-')")
-
-
-def validate_shell(shell: str) -> None:
-    """Validate that shell is a known, existing shell."""
-    shell_path = Path(shell)
-    if not shell_path.is_absolute():
-        raise SystemExit(f"Shell must be an absolute path: {shell!r}")
-    if not shell_path.is_file():
-        raise SystemExit(f"Shell does not exist: {shell}")
-    if ETC_SHELLS.exists():
-        allowed = {
-            line.strip()
-            for line in ETC_SHELLS.read_text().splitlines()
-            if line.strip() and not line.startswith("#")
-        }
-        if shell not in allowed:
-            raise SystemExit(f"Shell not in /etc/shells: {shell}")
-
-
-def check_config_permissions(config_file: Path) -> None:
-    """Check config file permissions and refuse insecure files."""
-    mode = config_file.stat().st_mode
-    if mode & 0o002:
-        raise SystemExit(f"Config file is world-writable, refusing to load: {config_file}")
-    if mode & 0o020:
-        raise SystemExit(f"Config file is group-writable, refusing to load: {config_file}")
-
-
-def _tiocsti_vulnerable() -> bool:
-    """Check if the kernel is vulnerable to TIOCSTI injection.
-
-    Kernels 6.2+ disable TIOCSTI by default (CONFIG_LEGACY_TIOCSTI).
-    On older kernels, check the sysctl override.
-    """
-    sysctl = Path("/proc/sys/dev/tty/legacy_tiocsti")
-    if sysctl.exists():
-        return sysctl.read_text().strip() != "0"
-    # No sysctl means pre-6.2 kernel — TIOCSTI is enabled
-    release = os.uname().release
-    parts = release.split(".")
-    try:
-        major, minor = int(parts[0]), int(parts[1])
-    except (IndexError, ValueError):
-        return True  # assume vulnerable if we can't parse
-    return major < 6 or (major == 6 and minor < 2)
-
-
-_SCHEMA: dict[str, dict[str, type]] = {
-    "project": {"name": str, "dir": str, "shell": str},
-    "sandbox": {
-        "enabled": bool,
-        "blacklist": list,
-        "whitelist": list,
-        "unshare_net": bool,
-        "unshare_pid": bool,
-        "new_session": bool,
-        "writable": list,
-    },
-    "secrets": {"archive": str, "identity": str, "dest": str, "writeback": bool},
-}
-
-
-def validate_config(config: dict[str, Any]) -> None:
-    """Validate config schema, rejecting unknown keys and wrong types."""
-    user_keys = {k for k in config if not k.startswith("_")}
-    unknown_top = user_keys - _SCHEMA.keys()
-    if unknown_top:
-        raise SystemExit(
-            f"Unknown config sections: {sorted(unknown_top)}\n"
-            f"Allowed: {sorted(_SCHEMA.keys())}"
-        )
-
-    for section, rules in _SCHEMA.items():
-        if section not in config:
-            continue
-        value = config[section]
-        if not isinstance(value, dict):
-            raise SystemExit(f"[{section}] must be a table, got {type(value).__name__}")
-
-        unknown_keys = set(value.keys()) - rules.keys()
-        if unknown_keys:
-            raise SystemExit(
-                f"[{section}] unknown keys: {sorted(unknown_keys)}\n"
-                f"Allowed: {sorted(rules.keys())}"
-            )
-        for k, v in value.items():
-            expected = rules[k]
-            if expected is list:
-                if not isinstance(v, list):
-                    raise SystemExit(
-                        f"[{section}].{k}: expected list, got {type(v).__name__}"
-                    )
-                if not all(isinstance(item, str) for item in v):
-                    raise SystemExit(f"[{section}].{k}: all items must be strings")
-            elif not isinstance(v, expected):
-                raise SystemExit(
-                    f"[{section}].{k}: expected {expected.__name__}, "
-                    f"got {type(v).__name__}"
-                )
 
 
 def load_config(name: str) -> dict[str, Any]:
@@ -187,7 +81,6 @@ def build_bwrap_args(
     init_script: Path | None = None,
     ro_bind_extra: list[Path] | None = None,
     rw_bind_extra: list[Path] | None = None,
-    setenv_extra: dict[str, str] | None = None,
 ) -> list[str]:
     """Build bubblewrap command arguments.
 
@@ -195,9 +88,8 @@ def build_bwrap_args(
         sandbox: Sandbox configuration dict
         project_dir: Project working directory
         init_script: Optional init script to bind-mount read-only into sandbox
-        ro_bind_extra: Additional paths to bind-mount read-only (e.g. secrets files)
-        rw_bind_extra: Additional paths to bind-mount read-write (e.g. writeback archive)
-        setenv_extra: Additional environment variables to set inside sandbox
+        ro_bind_extra: Additional paths to bind-mount read-only
+        rw_bind_extra: Additional paths to bind-mount read-write (e.g. encrypted mountpoint)
 
     Returns:
         List of bwrap arguments
@@ -286,7 +178,7 @@ def build_bwrap_args(
         args.extend(["--bind", str(path), str(path)])
 
     # TIOCSTI protection (--new-session breaks fish TTY, so only enable when needed)
-    vulnerable = _tiocsti_vulnerable()
+    vulnerable = tiocsti_vulnerable()
     new_session_cfg = sandbox.get("new_session")
     if new_session_cfg is True:
         args.append("--new-session")
@@ -313,8 +205,6 @@ def build_bwrap_args(
 
     # Set environment variables
     args.extend(["--setenv", "PROJECT_WRAP", "1"])
-    for key, value in (setenv_extra or {}).items():
-        args.extend(["--setenv", key, value])
 
     # Set working directory
     args.extend(["--chdir", str(project_dir)])
@@ -341,49 +231,16 @@ def get_init_script(config_dir: Path, shell: str) -> Path | None:
     return None
 
 
-@dataclass
-class ResolvedSecrets:
-    """Resolved secrets config with absolute paths."""
-
-    archive: Path
-    identity: Path
-    dest: str
-    writeback: bool = False
-
-
 def _build_init_commands(
     project_dir: Path,
     config_dir: Path,
     shell: str,
-    secrets: ResolvedSecrets | None = None,
 ) -> list[str]:
-    """Build setup commands (cd, secrets decryption, init script sourcing).
+    """Build setup commands (cd, init script sourcing).
 
     Returns list of shell commands — does NOT include the final exec/shell launch.
     """
     commands: list[str] = []
-
-    # Decrypt secrets archive into sandbox tmpfs (before cd so dest can be absolute)
-    if secrets is not None:
-        dest = shlex.quote(secrets.dest)
-        archive = shlex.quote(str(secrets.archive))
-        identity = shlex.quote(str(secrets.identity))
-        commands.append(f"mkdir -p {dest}")
-        commands.append(f"age -d -i {identity} {archive} | tar x -C {dest}")
-
-        # Writeback: re-encrypt on shell exit
-        if secrets.writeback:
-            shell_name = Path(shell).name
-            wb_cmd = (
-                'tar c -C "$PWRAP_SECRETS_DEST" . | '
-                'age -e -i "$PWRAP_SECRETS_IDENTITY" -o "$PWRAP_SECRETS_ARCHIVE"'
-            )
-            if shell_name == "fish":
-                commands.append(
-                    f"function __pwrap_writeback --on-event fish_exit; {wb_cmd}; end"
-                )
-            else:
-                commands.append(f"trap '{wb_cmd}' EXIT")
 
     commands.append(f"cd {shlex.quote(str(project_dir))}")
 
@@ -398,7 +255,6 @@ def build_shell_argv(
     project_dir: Path,
     config_dir: Path,
     shell: str,
-    secrets: ResolvedSecrets | None = None,
 ) -> list[str]:
     """Build the full argv to launch an interactive shell with project setup.
 
@@ -406,7 +262,7 @@ def build_shell_argv(
     - fish: --init-command (runs after config.fish, before prompt)
     - other shells: -c "setup; exec shell"
     """
-    commands = _build_init_commands(project_dir, config_dir, shell, secrets)
+    commands = _build_init_commands(project_dir, config_dir, shell)
     shell_name = Path(shell).name
 
     if shell_name == "fish":
@@ -449,7 +305,7 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     # Extract config sections
     project_cfg = config.get("project", {})
     sandbox_cfg = config.get("sandbox", {})
-    secrets_cfg = config.get("secrets", {})
+    encrypted_cfg = config.get("encrypted", {})
     config_dir: Path = config["_config_dir"]
 
     # Resolve settings
@@ -463,51 +319,38 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     if not project_dir.exists():
         raise SystemExit(f"Project directory does not exist: {project_dir}")
 
-    # Secrets require sandbox (decrypted into sandbox tmpfs)
-    if secrets_cfg and not sandbox_enabled:
+    # Encrypted volumes require sandbox
+    if encrypted_cfg and not sandbox_enabled:
         raise SystemExit(
-            "[secrets] requires sandbox to be enabled "
-            "(secrets are decrypted into sandbox tmpfs)"
+            "[encrypted] requires sandbox to be enabled"
         )
 
-    # Resolve secrets paths
-    resolved_secrets: ResolvedSecrets | None = None
-    ro_bind_extra: list[Path] = []
-    rw_bind_extra: list[Path] = []
-    setenv_extra: dict[str, str] = {}
-    if secrets_cfg:
-        require_dep("age")
+    # Resolve encrypted volume config
+    vault_config: VaultConfig | None = None
+    if encrypted_cfg:
+        require_dep("gocryptfs")
 
-        archive_raw = secrets_cfg["archive"]
-        archive_path = expand_path(archive_raw)
-        if not archive_path.is_absolute():
-            archive_path = config_dir / archive_raw
-        if not archive_path.is_file():
-            raise SystemExit(f"Secrets archive not found: {archive_path}")
+        cipherdir_raw = encrypted_cfg["cipherdir"]
+        cipherdir_path = expand_path(cipherdir_raw)
+        if not cipherdir_path.is_absolute():
+            cipherdir_path = config_dir / cipherdir_raw
+        cipherdir = cipherdir_path.resolve()
 
-        identity_path = expand_path(secrets_cfg["identity"])
-        if not identity_path.is_file():
-            raise SystemExit(f"Secrets identity file not found: {identity_path}")
+        if not cipherdir.is_dir():
+            raise SystemExit(
+                f"Encrypted cipherdir does not exist: {cipherdir}\n"
+                f"Initialize it with: mkdir -p '{cipherdir}' && "
+                f"gocryptfs -init '{cipherdir}'"
+            )
 
-        dest = secrets_cfg.get("dest", "/tmp/pwrap-secrets")
-        writeback = secrets_cfg.get("writeback", False)
+        mountpoint = expand_path(encrypted_cfg["mountpoint"])
+        mountpoint.mkdir(parents=True, exist_ok=True)
 
-        ro_bind_extra = [identity_path.resolve()]
-        if writeback:
-            rw_bind_extra = [archive_path.resolve()]
-            setenv_extra = {
-                "PWRAP_SECRETS_DEST": dest,
-                "PWRAP_SECRETS_ARCHIVE": str(archive_path.resolve()),
-                "PWRAP_SECRETS_IDENTITY": str(identity_path.resolve()),
-            }
-        else:
-            ro_bind_extra.append(archive_path.resolve())
-
-        resolved_secrets = ResolvedSecrets(
-            archive=archive_path.resolve(),
-            identity=identity_path.resolve(),
-            dest=dest,
-            writeback=writeback,
+        vault_config = VaultConfig(
+            cipherdir=cipherdir,
+            mountpoint=mountpoint.resolve(),
+            project_name=name,
+            shared=encrypted_cfg.get("shared", False),
         )
 
     # Rename tmux window
@@ -515,9 +358,7 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
 
     # Resolve init script and build shell argv
     init_script = get_init_script(config_dir, shell)
-    shell_argv = build_shell_argv(
-        project_dir, config_dir, shell, secrets=resolved_secrets
-    )
+    shell_argv = build_shell_argv(project_dir, config_dir, shell)
 
     # Non-sandboxed execution
     if not sandbox_enabled:
@@ -530,10 +371,14 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     # Sandboxed execution - verify bwrap is available
     require_dep("bwrap")
 
+    # If encrypted volume, bind the mountpoint into the sandbox
+    rw_bind_extra: list[Path] = []
+    if vault_config:
+        rw_bind_extra = [vault_config.mountpoint]
+
     bwrap_args = build_bwrap_args(
         sandbox_cfg, project_dir,
-        init_script=init_script, ro_bind_extra=ro_bind_extra,
-        rw_bind_extra=rw_bind_extra, setenv_extra=setenv_extra,
+        init_script=init_script, rw_bind_extra=rw_bind_extra,
     )
     bwrap_args.extend(shell_argv)
 
@@ -547,6 +392,7 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
         argv=bwrap_args,
         is_sandboxed=True,
         verbose_info=verbose_info,
+        vault_config=vault_config,
     )
 
 
@@ -555,39 +401,31 @@ def run_project(name: str, verbose: bool = False) -> None:
 
     This function does not return on success (execs into new shell).
     """
+    from .vault import run_shared, run_single
+
     result = prepare_project(name, verbose)
 
     label = result.display_name
     if result.is_sandboxed:
         label += " (sandboxed)"
+        if result.vault_config is not None:
+            if result.vault_config.shared:
+                label += " (shared vault)"
+            else:
+                label += " (vault)"
     print(f"Loading {label}")
 
     if result.verbose_info:
         print(result.verbose_info)
 
-    os.execvp(result.program, result.argv)
+    if result.vault_config:
+        if result.vault_config.shared:
+            sys.exit(run_shared(result.vault_config, result.argv))
+        else:
+            sys.exit(run_single(result.vault_config, result.argv))
+    else:
+        os.execvp(result.program, result.argv)
 
-
-def writeback_secrets() -> None:
-    """Re-encrypt secrets dest back to the archive. Runs inside the sandbox."""
-    dest = os.environ.get("PWRAP_SECRETS_DEST")
-    archive = os.environ.get("PWRAP_SECRETS_ARCHIVE")
-    identity = os.environ.get("PWRAP_SECRETS_IDENTITY")
-
-    if not all([dest, archive, identity]):
-        raise SystemExit(
-            "Not in a writeback-enabled sandbox "
-            "(PWRAP_SECRETS_* environment variables not set)"
-        )
-
-    result = subprocess.run(
-        f'tar c -C {shlex.quote(dest)} . | '  # type: ignore[arg-type]
-        f'age -e -i {shlex.quote(identity)} -o {shlex.quote(archive)}',  # type: ignore[arg-type]
-        shell=True,
-    )
-    if result.returncode != 0:
-        raise SystemExit("Writeback failed")
-    print(f"Secrets written back to {archive}")
 
 
 TEMPLATE_NAMES = ["project.tpl.toml", "init.tpl.fish", "init.tpl.sh"]

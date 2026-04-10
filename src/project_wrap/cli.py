@@ -12,7 +12,6 @@ from .core import (
     get_config_dir,
     list_projects,
     run_project,
-    writeback_secrets,
 )
 from .deps import check_optional_deps
 
@@ -44,11 +43,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Shell to configure (use with --new, defaults to $SHELL)",
     )
     parser.add_argument(
-        "--writeback",
-        action="store_true",
-        help="Re-encrypt secrets (checkpoint, run inside sandbox)",
-    )
-    parser.add_argument(
         "-l",
         "--list",
         action="store_true",
@@ -74,10 +68,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        if args.writeback:
-            writeback_secrets()
-            return 0
-
         if args.check_deps:
             check_optional_deps(verbose=True)
             return 0

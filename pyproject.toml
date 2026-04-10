@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "projectwrap"
-version = "0.1.0"
+version = "202604.1"
 description = "Isolated project environments with bubblewrap sandboxing"
 readme = "README.md"
 license = "MIT"

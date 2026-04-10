@@ -1,285 +1,213 @@
-# project-wrap
+# pwrap
 
-Isolated project environments with bubblewrap sandboxing.
+pwrap wraps project shell environments in bubblewrap sandboxes, and aims to
+_limit the blast radius_ of e.g. supply chain attacks and protect your production
+infrastructure from your sloppy side project.
 
-A CLI tool that launches shell environments for your projects with:
-- **Filesystem isolation** via [bubblewrap](https://github.com/containers/bubblewrap) — hide sensitive configs from project shells
-- **Encrypted secrets** via [age](https://age-encryption.org/) — decrypt archives into sandbox tmpfs (RAM-only, auto-cleanup)
-- **Shell-agnostic** — works with fish, bash, zsh
-- **TOML configuration** — declarative, easy to version control
+**Does:**
+- Launches sandboxed shells with per-project filesystem isolation
+- Hides sensitive paths (credentials, configs, SSH keys) via tmpfs overlays
+- Exposes only what each project needs (whitelisting)
+- Mounts gocryptfs encrypted volumes inside isolated namespaces
+- Runs init scripts for env vars, venv activation, aliases
+
+**Doesn't do:**
+- Network filtering (it's all-or-nothing via `unshare_net`)
+- Container-level isolation (no cgroups, no seccomp, no resource limits)
+- Do package management or dependency resolution
+- Protect you from your own misconfiguration
+
+**Dependencies:** Python 3.11+ (stdlib only, no pip dependencies),
+[bubblewrap](https://github.com/containers/bubblewrap) for sandboxing,
+[gocryptfs](https://nuetzlich.net/gocryptfs/) for encrypted volumes.
+
+**Design principles:**
+- **Reviewable** — small codebase, no pip dependencies, no magic
+- **Fail fast** — invalid config is an error, not a warning
+- **Explicit over convenient** — no implicit defaults that hide security decisions
+- **Init scripts as the extension point** — env vars, venv, aliases all go there,
+  not in config schema
 
 ## Installation
 
-```bash
-# From PyPI
-pipx install projectwrap
+pwrap has no pip dependencies — only the standard library. For a security tool,
+installing from source lets you audit what you're running:
 
-# From source
+```bash
 git clone https://github.com/haard/projectwrap
 cd projectwrap
-pip install -e .
+pip install --no-deps .
 ```
 
-The command is called `pwrap`.
+Or from PyPI if you prefer convenience: `pipx install projectwrap`
 
-### Dependencies
-
-Required:
-- Python 3.11+
-
-Optional (checked at runtime):
-- `bubblewrap` — for sandbox isolation (`sudo apt install bubblewrap`)
-- `age` — for decrypting secrets (`sudo apt install age`)
-
-Check dependency status:
-```bash
-pwrap --check-deps
-```
+Check optional dependencies with `pwrap --check-deps`.
 
 ## Quick Start
 
-1. Create a project config (generates `project.toml`, `init.fish`, `init.sh`):
 ```bash
-pwrap --new ~/projects/myproject
+pwrap --new ~/projects/myproject    # creates config + init script
+# edit ~/.config/pwrap/myproject/project.toml and init script
+pwrap myproject                     # launch sandboxed shell
 ```
 
-2. Edit `~/.config/pwrap/myproject/project.toml` to configure sandboxing, and
-   `init.fish`/`init.sh` for environment setup.
+On first run, `--new` creates editable templates in `~/.config/pwrap/`. Edit them
+to set your defaults, then run `--new` again.
 
-3. Launch the project:
-```bash
-pwrap myproject
-```
+## Examples
 
-## Configuration Reference
+### Basic sandboxed project
 
-### Directory Structure
-
-```
-~/.config/pwrap/
-├── myproject/
-│   ├── project.toml      # Required: project configuration
-│   ├── init.fish         # Optional: runs inside sandbox (fish)
-│   ├── init.bash         # Optional: runs inside sandbox (bash)
-│   └── init.sh           # Optional: fallback init script
-└── another-project/
-    └── project.toml
-```
-
-### project.toml
-
+`~/.config/pwrap/myproject/project.toml`:
 ```toml
 [project]
-name = "Display Name"           # Optional, defaults to directory name
-dir = "~/projects/myproject"    # Required: project working directory
-shell = "/usr/bin/fish"         # Optional, defaults to $SHELL
-
-[sandbox]
-enabled = true                  # Enable bubblewrap isolation
-blacklist = [                   # Paths to hide (overlaid with tmpfs)
-    "~/.config/pwrap",
-    "~/.kube",
-    "~/.aws",
-    "~/.ssh",
-]
-whitelist = [                   # Exceptions to blacklist (bound back)
-    "~/.kube/myproject",
-    "~/.ssh/myproject_ed25519",    # This project's SSH key only
-    "~/.ssh/known_hosts",
-]
-writable = [                    # Extra writable paths (home is read-only)
-    "~/.pyenv/shims",
-    "~/.keychain",
-    # "~/.claude",               # For running Claude Code inside sandbox
-]
-unshare_net = false             # Isolate network namespace
-unshare_pid = true              # Isolate PID namespace (default: true)
-
-[secrets]                        # age-encrypted archive (sandbox only)
-archive = "secrets.tar.age"     # Relative to config dir, or absolute
-identity = "~/.age/key.txt"     # age identity file
-dest = "/tmp/secrets"           # Decrypted into sandbox tmpfs (default: /tmp/pwrap-secrets)
-writeback = true                # Re-encrypt on exit + pwrap --writeback
-
-```
-
-### Init Scripts
-
-Init scripts run **inside** the sandbox after environment setup. Use them for:
-- Environment variables (`set -gx`, `export`)
-- Virtual environment activation (`source .venv/bin/activate.fish`)
-- Tool version switching (pyenv, nvm, etc.)
-- Project-specific aliases
-
-The tool looks for (in order):
-1. `init.{shell}` — e.g., `init.fish` for fish shell
-2. `init.sh` — fallback for any shell
-
-Example `init.fish`:
-```fish
-# Extra setup that runs inside the sandbox
-set -gx DJANGO_SETTINGS_MODULE myproject.settings.local
-alias dj "python manage.py"
-```
-
-### Secrets
-
-The `[secrets]` section decrypts an [age](https://age-encryption.org/)-encrypted tar
-archive into the sandbox's `/tmp` (tmpfs). Secrets live only in RAM, are visible only
-inside the sandbox, and are automatically cleaned up when the shell exits. Requires
-`sandbox.enabled = true`.
-
-With `writeback = true`, secrets are re-encrypted back to the archive on shell exit.
-You can also checkpoint manually with `pwrap --writeback`.
-
-#### Example: Encrypting Claude Code history
-
-You want to run Claude Code inside a sandboxed project, but keep the chat history
-encrypted at rest so it's only accessible inside the sandbox.
-
-**1. Generate an age key:**
-```bash
-age-keygen -o ~/.age/key.txt
-```
-
-**2. Create the initial encrypted archive from an existing folder:**
-```bash
-tar c -C ~/.claude-secretproject . | \
-    age -e -i ~/.age/key.txt -o ~/.config/pwrap/secretproject/claude.tar.age
-```
-
-(If starting fresh, create an empty archive: `tar c --files-from /dev/null | age -e ...`)
-
-**3. Configure the project** (`~/.config/pwrap/secretproject/project.toml`):
-```toml
-[project]
-name = "secretproject"
-dir = "~/projects/secretproject"
+name = "myproject"
+dir = "~/projects/myproject"
 shell = "/usr/bin/fish"
 
 [sandbox]
 enabled = true
-writable = ["~/.claude-secretproject"]
-
-[secrets]
-archive = "claude.tar.age"
-identity = "~/.age/key.txt"
-dest = "~/.claude-secretproject"
-writeback = true
+blacklist = [
+    "~/.kube",
+    "~/.aws",
+    "~/.ssh",
+]
+whitelist = [
+    "~/.kube/myproject",
+    "~/.ssh/myproject_ed25519",
+    "~/.ssh/known_hosts",
+]
 ```
 
-Note: `dest` is where the decrypted files appear. It must be writable inside the
-sandbox (listed in `writable` or under the project dir). Your init script must set
-`CLAUDE_CONFIG_DIR` so Claude Code uses the decrypted location:
-
+`~/.config/pwrap/myproject/init.fish`:
 ```fish
-# init.fish
-set -gx CLAUDE_CONFIG_DIR ~/.claude-secretproject
+source .venv/bin/activate.fish
+set -gx KUBECONFIG ~/.kube/myproject/config
+set -gx GIT_SSH_COMMAND "ssh -i ~/.ssh/myproject_ed25519 -o IdentitiesOnly=yes"
 ```
 
-**4. Launch the project:**
+The config directory (`~/.config/pwrap`) is always blacklisted automatically — code
+inside the sandbox cannot read other project configs.
+
+### Encrypted AI chat history
+
+Keep aichat/Claude chat history encrypted at rest, decrypted only inside the sandbox.
+Uses gocryptfs mounted in an isolated namespace (invisible on host).
+
+**Setup:**
 ```bash
-pwrap secretproject
+# Initialize encrypted directory (once, prompts for password)
+mkdir -p ~/.config/pwrap/myproject/encrypted
+gocryptfs -init ~/.config/pwrap/myproject/encrypted
 ```
 
-On entry, the archive is decrypted into `~/.claude-secretproject`. Claude Code runs
-normally. On exit, the contents are re-encrypted back to `claude.tar.age`. Between
-sessions, only the encrypted archive exists on disk.
+**Config** (`project.toml`):
+```toml
+[project]
+name = "myproject"
+dir = "~/projects/myproject"
+shell = "/usr/bin/fish"
 
-**5. Checkpoint during a session** (optional):
-```bash
-pwrap --writeback
+[sandbox]
+enabled = true
+
+[encrypted]
+cipherdir = "encrypted"
+mountpoint = "~/.local/share/aichat"
 ```
+
+**Init script** (`init.fish`):
+```fish
+set -gx AICHAT_CONFIG_DIR ~/.local/share/aichat
+# For Claude Code:
+# set -gx CLAUDE_CONFIG_DIR ~/.local/share/claude
+```
+
+On `pwrap myproject`, gocryptfs prompts for the password, mounts the decrypted
+volume inside an isolated mount namespace, and launches the sandboxed shell.
+The decrypted files are invisible to host processes and disappear when the shell
+exits.
+
+**Multiple terminals** (`shared = false`, default): each terminal gets an
+independent gocryptfs mount. Writes to different files merge on next session;
+writes to the same file from two sessions may lose the first session's changes.
+pwrap warns and prompts for confirmation when a concurrent session is detected.
+
+**Shared mode** (`shared = true`): a background daemon holds a single gocryptfs
+mount shared across terminals. On first launch, pwrap prints a vault token.
+Subsequent terminals must enter the token to connect (prompted, no echo).
+Inside the sandbox, `echo $PWRAP_VAULT_TOKEN` retrieves it.
+
+### GUI apps in sandbox (WSL2)
+
+To run emacs or other GUI apps inside the sandbox on WSL2:
+
+```toml
+[sandbox]
+writable = [
+    "/tmp/.X11-unix",           # X11 display socket
+    "/mnt/wslg/runtime-dir",   # Wayland + PulseAudio
+]
+```
+
+## Configuration
+
+`pwrap --new` generates a `project.toml` template with all options documented.
+The three config sections:
+
+| Section | Purpose |
+|---|---|
+| `[project]` | name, dir, shell |
+| `[sandbox]` | blacklist, whitelist, writable, namespace options |
+| `[encrypted]` | gocryptfs cipherdir, mountpoint, shared mode |
+
+Init scripts (`init.fish` or `init.sh`) run inside the sandbox for env vars,
+venv activation, aliases, and tool version switching.
 
 ## Usage
 
 ```bash
-# List all projects
-pwrap
-
-# Load a project (sandboxed if configured)
-pwrap myproject
-
-# Load with verbose output
-pwrap -v myproject
-
-# Create a new project config (name defaults to directory basename)
-pwrap --new ~/projects/myproject
-
-# Create with explicit name
-pwrap --new ~/projects/myproject my-custom-name
-
-# Create without sandbox
-pwrap --new ~/projects/myproject --no-sandbox
-
-# Checkpoint secrets (re-encrypt, run inside sandbox)
-pwrap --writeback
-
-# Check optional dependencies
-pwrap --check-deps
-
-# Show version
-pwrap --version
+pwrap                                      # list projects
+pwrap myproject                            # launch project
+pwrap -v myproject                         # verbose output
+pwrap --new ~/projects/myproject           # create config (name from dir)
+pwrap --new ~/projects/myproject custom    # create with explicit name
+pwrap --new --shell /bin/bash ~/projects/x # specify shell
+pwrap --check-deps                         # check optional dependencies
+pwrap --version                            # show version
 ```
-
-## How It Works
-
-1. **Config loading**: Reads `project.toml` from outside any sandbox
-2. **tmux rename**: Renames current tmux window to project name
-3. **Sandbox setup**: Builds bubblewrap arguments from config
-4. **Shell launch**: Execs into sandboxed shell with init script
-5. **Secrets decryption**: If configured, decrypts age archive into `/tmp` (sandbox tmpfs)
-
-The key security property: **the config directory itself is blacklisted**, so code running inside the sandbox cannot read other project configs or modify its own sandboxing rules.
 
 ## Security Defaults
 
-When sandboxing is enabled, project-wrap applies these hardening measures automatically:
+When sandboxing is enabled:
 
-- Home directory is mounted **read-only**; only the project directory is writable
-- PID namespace is isolated by default (`unshare_pid = true`)
-- IPC namespace is isolated (`--unshare-ipc`)
-- TIOCSTI input injection is blocked automatically on vulnerable kernels (< 6.2) via
-  `--new-session`. Can be forced on/off with `new_session = true/false` in config.
-  Note: `--new-session` breaks fish shell TTY on some setups
-- Sandbox dies with parent process (`--die-with-parent`)
-- XDG runtime directory (`/run/user/$UID`) is isolated
-- Blacklisted paths must exist (config error otherwise)
-- Whitelist paths must be children of a blacklisted path (config error otherwise)
+- Home is **read-only**; only the project directory is writable
+- Config directory (`~/.config/pwrap`) is always blacklisted
+- PID and IPC namespaces are isolated
+- TIOCSTI injection blocked automatically on kernels < 6.2
+- XDG runtime directory isolated
+- Sandbox dies with parent process
+- Encrypted volumes mount in isolated namespace (invisible on host)
 - All paths in shell commands are quoted to prevent injection
 
 ## Shell Completions
 
-### Fish
 ```bash
+# Fish
 cp completions/project.fish ~/.config/fish/completions/pwrap.fish
-```
-
-### Bash
-```bash
+# Bash
 cp completions/project.bash /etc/bash_completion.d/pwrap
-# or source in .bashrc
-```
-
-### Zsh
-```bash
+# Zsh
 cp completions/_project ~/.local/share/zsh/site-functions/_pwrap
 ```
 
 ## Development
 
 ```bash
-# Install with dev dependencies
-poetry install
-
-# Run tests
-poetry run pytest
-
-# Type checking
-poetry run mypy src/
-
-# Linting
-poetry run ruff check src/
+poetry install              # install with dev dependencies
+poetry run pytest           # run tests
+poetry run ruff check src/  # lint
+poetry run mypy src/        # type check
 ```
 
 ## License

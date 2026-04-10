@@ -1,3 +1,3 @@
 """project-wrap: Isolated project environments with bubblewrap sandboxing."""
 
-__version__ = "0.1.0"
+__version__ = "202604.1"

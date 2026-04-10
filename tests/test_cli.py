@@ -88,12 +88,6 @@ class TestCLI:
         assert (config_dir / "myproj" / "project.toml").exists()
         assert "Created" in capsys.readouterr().out
 
-    def test_writeback_outside_sandbox(self, capsys):
-        result = main(["--writeback"])
-
-        assert result == 1
-        assert "Not in a writeback" in capsys.readouterr().err
-
     def test_new_without_name_uses_dir_basename(self, tmp_path, monkeypatch, capsys):
         config_dir = tmp_path / "config"
         config_dir.mkdir()

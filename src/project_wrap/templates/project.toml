@@ -21,8 +21,7 @@ enabled = {sandbox_enabled}
 # unshare_pid = true              # Isolate PID namespace (default: true)
 # new_session = true              # TIOCSTI protection (auto on kernels < 6.2)
 
-# [secrets]                        # age-encrypted archive (sandbox only)
-# archive = "secrets.tar.age"     # Relative to config dir, or absolute
-# identity = "~/.age/key.txt"     # age identity file
-# dest = "/tmp/pwrap-secrets"     # Decrypted into sandbox tmpfs
-# writeback = true                # Re-encrypt on exit + pwrap --writeback
+# [encrypted]                      # gocryptfs encrypted volume (sandbox only)
+# cipherdir = "encrypted"         # Relative to config dir, or absolute
+# mountpoint = "~/.local/share/myapp"  # Where decrypted files appear
+# shared = false                  # true = daemon mode (multi-terminal, unix socket)
