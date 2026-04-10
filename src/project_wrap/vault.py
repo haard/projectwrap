@@ -9,10 +9,12 @@ Two modes:
 
 from __future__ import annotations
 
+import fcntl
 import getpass
 import json
 import os
 import secrets
+import shlex
 import signal
 import socket
 import struct
@@ -61,46 +63,43 @@ def _is_process_alive(pid: int) -> bool:
         return False
 
 
-def _check_concurrent(project: str) -> bool:
-    """Check if another session is active. Returns True if user confirms to proceed."""
+def _try_lock(project: str) -> int | None:
+    """Try to acquire an exclusive flock. Returns fd if acquired, None if held."""
     lock = _lock_path(project)
-    if not lock.exists():
-        return True
-
+    fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        pid = int(lock.read_text().strip())
-    except (ValueError, OSError):
-        return True
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except OSError:
+        os.close(fd)
+        return None
 
-    if not _is_process_alive(pid):
-        lock.unlink(missing_ok=True)
-        return True
+
+def _check_concurrent(project: str) -> int | None:
+    """Check if another session is active.
+
+    Returns lock fd if acquired (caller holds lock), or None if user aborted.
+    Prompts for confirmation if another session holds the lock.
+    """
+    fd = _try_lock(project)
+    if fd is not None:
+        return fd
 
     print(
-        f"Warning: another session for '{project}' is active (PID {pid}).\n"
+        f"Warning: another session for '{project}' is active.\n"
         "Changes to encrypted files may not be visible across sessions,\n"
         "and concurrent writes to the same file may cause lost updates.\n"
     )
     try:
-        response = input("Press Enter to continue, Ctrl-C to abort: ")  # noqa: F841
-        return True
+        input("Press Enter to continue, Ctrl-C to abort: ")
     except (KeyboardInterrupt, EOFError):
         print()
-        return False
+        return None
 
-
-def _acquire_lock(project: str) -> None:
-    _lock_path(project).write_text(str(os.getpid()))
-
-
-def _release_lock(project: str) -> None:
-    lock = _lock_path(project)
-    try:
-        pid = int(lock.read_text().strip())
-        if pid == os.getpid():
-            lock.unlink(missing_ok=True)
-    except (ValueError, OSError):
-        lock.unlink(missing_ok=True)
+    # Acquire a shared lock (allows concurrent, but still tracks participation)
+    fd = os.open(str(_lock_path(project)), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    return fd
 
 
 # --- Single session mode (shared=False) ---
@@ -111,15 +110,17 @@ def run_single(config: VaultConfig, bwrap_argv: list[str]) -> int:
 
     Does not return on success (execs into unshare).
     """
-    if not _check_concurrent(config.project_name):
+    lock_fd = _check_concurrent(config.project_name)
+    if lock_fd is None:
         return 130  # same as KeyboardInterrupt
-
-    _acquire_lock(config.project_name)
+    # Keep lock fd open through exec so flock is held for the session lifetime
+    os.set_inheritable(lock_fd, True)
 
     # Build the inner command: mount gocryptfs, then exec bwrap
-    bwrap_cmd = " ".join(f"'{a}'" for a in bwrap_argv)
+    bwrap_cmd = " ".join(shlex.quote(a) for a in bwrap_argv)
     inner = (
-        f"gocryptfs '{config.cipherdir}' '{config.mountpoint}' && "
+        f"gocryptfs {shlex.quote(str(config.cipherdir))} "
+        f"{shlex.quote(str(config.mountpoint))} && "
         f"exec {bwrap_cmd}"
     )
 
@@ -128,11 +129,7 @@ def run_single(config: VaultConfig, bwrap_argv: list[str]) -> int:
         "--", "sh", "-c", inner,
     ]
 
-    try:
-        os.execvp("unshare", argv)
-    finally:
-        _release_lock(config.project_name)
-
+    os.execvp("unshare", argv)
     return 1  # unreachable after exec
 
 
@@ -196,6 +193,7 @@ def daemon_serve(
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(sock_path))
+    os.chmod(str(sock_path), 0o600)
     server.listen(5)
     server.settimeout(1.0)
 

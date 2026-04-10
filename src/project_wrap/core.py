@@ -141,15 +141,16 @@ def build_bwrap_args(
     # Whitelist paths by binding them back (must be under a blacklisted path)
     for path in sandbox.get("whitelist", []):
         p = expand_path(path)
-        resolved_p = p.resolve()
-        if not any(resolved_p == bl or bl in resolved_p.parents for bl in blacklist_paths):
+        if not p.exists():
+            continue
+        # Resolve once to prevent symlink TOCTOU
+        resolved = p.resolve()
+        if not any(resolved == bl or bl in resolved.parents for bl in blacklist_paths):
             raise SystemExit(
                 f"Whitelist path {p} is not under any blacklisted path. "
                 f"Blacklisted: {[str(bl) for bl in blacklist_paths]}"
             )
-        if p.exists():
-            resolved_bind = p.resolve()
-            args.extend(["--bind", str(resolved_bind), str(resolved_bind)])
+        args.extend(["--bind", str(resolved), str(resolved)])
 
     # Extra writable paths (e.g. ~/.pyenv/shims, ~/.keychain)
     for path in sandbox.get("writable", []):

@@ -62,7 +62,16 @@ def validate_shell(shell: str) -> None:
 
 
 def check_config_permissions(config_file: Path) -> None:
-    """Check config file permissions and refuse insecure files."""
+    """Check config file and parent directory permissions, refuse insecure files."""
+    # Check parent directory
+    parent = config_file.parent
+    parent_mode = parent.stat().st_mode
+    if parent_mode & 0o002:
+        raise SystemExit(f"Config directory is world-writable, refusing to load: {parent}")
+    if parent_mode & 0o020:
+        raise SystemExit(f"Config directory is group-writable, refusing to load: {parent}")
+
+    # Check file
     mode = config_file.stat().st_mode
     if mode & 0o002:
         raise SystemExit(f"Config file is world-writable, refusing to load: {config_file}")
