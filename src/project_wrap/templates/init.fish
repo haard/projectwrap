@@ -11,6 +11,8 @@
 # Claude Code / AI tools (with [encrypted] volume)
 # set -gx CLAUDE_CONFIG_DIR ~/.local/share/claude
 # set -gx AICHAT_CONFIG_DIR ~/.local/share/aichat
+# Inside an [encrypted] project, $PWRAP_VAULT_DIR points at the mountpoint,
+# e.g. set -gx FOO_HISTORY $PWRAP_VAULT_DIR/foo-history
 
 # Project-specific aliases
 # alias run "python manage.py runserver"

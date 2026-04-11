@@ -24,4 +24,9 @@ enabled = {sandbox_enabled}
 # [encrypted]                      # gocryptfs encrypted volume (sandbox only)
 # cipherdir = "encrypted"         # Relative to config dir, or absolute
 # mountpoint = "~/.local/share/myapp"  # Where decrypted files appear
-# shared = false                  # true = daemon mode (multi-terminal, unix socket)
+# shared = false                  # true = share one mount across terminals; first
+#                                 # terminal is primary, attached terminals die with it.
+# Inside the sandbox, $PWRAP_VAULT_DIR points at the mountpoint.
+# Note: encrypted volumes require unshare --user --map-root-user, so
+# `whoami` / `id -u` will report root inside the sandbox (user namespace only,
+# not real root).

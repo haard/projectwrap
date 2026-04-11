@@ -128,18 +128,40 @@ volume inside an isolated mount namespace, and launches the sandboxed shell.
 The decrypted files are invisible to host processes and disappear when the shell
 exits.
 
+If you enter the wrong password, gocryptfs re-prompts up to its own retry limit
+and then exits non-zero. pwrap aborts on that failure without launching the
+sandbox — no shell starts, no partial mount is left behind. Re-run `pwrap
+myproject` to try again.
+
+**`PWRAP_VAULT_DIR`**: inside any sandbox with an `[encrypted]` section, pwrap
+exports `PWRAP_VAULT_DIR` pointing at the mountpoint. Use it from init scripts
+or app configs to redirect history/state into the vault without hardcoding the
+path per project (e.g. `set savehist-file (expand-file-name "history" "$PWRAP_VAULT_DIR/emacs")`).
+
+**You will appear as root inside encrypted projects.** Mounting gocryptfs
+unprivileged requires `unshare --user --map-root-user`, so inside the sandbox
+`whoami` reports `root` and `id -u` reports `0`. This is a user-namespace
+remapping only — you have no real privileges on the host, cannot read
+root-owned files outside the namespace, and cannot escalate. Your real files
+(project dir, home bind-mounts, the vault mountpoint itself) remain owned by
+your real uid. Scripts that gate on `[ "$UID" = 0 ]` will misbehave; prefer
+`[ "$USER" = root ]` checks or, better, check the presence of
+`$PROJECT_WRAP` / `$PWRAP_VAULT_DIR`.
+
 **Multiple terminals** (`shared = false`, default): each terminal gets an
 independent gocryptfs mount. Writes to different files merge on next session;
 writes to the same file from two sessions may lose the first session's changes.
 pwrap warns and prompts for confirmation when a concurrent session is detected.
 
-**Shared mode** (`shared = true`): the first terminal becomes the primary
-session and holds a single gocryptfs mount shared across terminals. On first
-launch, pwrap prints a vault token. Subsequent terminals must enter the token
-to connect (prompted, no echo). Inside the sandbox, `echo $PWRAP_VAULT_TOKEN`
-retrieves it. When the primary exits, any attached terminals are terminated
-and the mount is released — keep the primary terminal open for the duration
-of the session.
+**Shared mode** (`shared = true`): the first terminal becomes the **primary**
+session. It mounts gocryptfs, prints a vault token, and stays in the
+foreground of the terminal that launched it (no background daemon — the
+serve process is a normal child of your shell). Additional terminals running
+`pwrap myproject` prompt for the token and attach as children of the primary.
+Inside the sandbox, `echo $PWRAP_VAULT_TOKEN` retrieves the token. When the
+primary exits (shell exit, Ctrl-C, or closing its terminal), all attached
+terminals are terminated and the mount is released — keep the primary
+terminal open for the duration of the session.
 
 ### GUI apps in sandbox (WSL2)
 
