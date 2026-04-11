@@ -133,10 +133,13 @@ independent gocryptfs mount. Writes to different files merge on next session;
 writes to the same file from two sessions may lose the first session's changes.
 pwrap warns and prompts for confirmation when a concurrent session is detected.
 
-**Shared mode** (`shared = true`): a background daemon holds a single gocryptfs
-mount shared across terminals. On first launch, pwrap prints a vault token.
-Subsequent terminals must enter the token to connect (prompted, no echo).
-Inside the sandbox, `echo $PWRAP_VAULT_TOKEN` retrieves it.
+**Shared mode** (`shared = true`): the first terminal becomes the primary
+session and holds a single gocryptfs mount shared across terminals. On first
+launch, pwrap prints a vault token. Subsequent terminals must enter the token
+to connect (prompted, no echo). Inside the sandbox, `echo $PWRAP_VAULT_TOKEN`
+retrieves it. When the primary exits, any attached terminals are terminated
+and the mount is released — keep the primary terminal open for the duration
+of the session.
 
 ### GUI apps in sandbox (WSL2)
 

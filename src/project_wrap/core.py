@@ -381,6 +381,8 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
         sandbox_cfg, project_dir,
         init_script=init_script, rw_bind_extra=rw_bind_extra,
     )
+    if vault_config:
+        bwrap_args.extend(["--setenv", "PWRAP_VAULT_DIR", str(vault_config.mountpoint)])
     bwrap_args.extend(shell_argv)
 
     verbose_info = None
@@ -402,7 +404,7 @@ def run_project(name: str, verbose: bool = False) -> None:
 
     This function does not return on success (execs into new shell).
     """
-    from .vault import run_shared, run_single
+    from .vault import run_vault
 
     result = prepare_project(name, verbose)
 
@@ -420,10 +422,7 @@ def run_project(name: str, verbose: bool = False) -> None:
         print(result.verbose_info)
 
     if result.vault_config:
-        if result.vault_config.shared:
-            sys.exit(run_shared(result.vault_config, result.argv))
-        else:
-            sys.exit(run_single(result.vault_config, result.argv))
+        sys.exit(run_vault(result.vault_config, result.argv))
     else:
         os.execvp(result.program, result.argv)
 

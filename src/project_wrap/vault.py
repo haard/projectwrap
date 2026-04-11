@@ -1,16 +1,22 @@
 """Encrypted volume management using gocryptfs in isolated mount namespaces.
 
-Two modes:
-- Single session (shared=False): unshare + gocryptfs + bwrap in one process chain.
-  Lockfile warns concurrent sessions about potential lost updates.
-- Shared session (shared=True): daemon holds the mount, spawns bwrap children via
-  unix socket with fd passing. Multiple terminals share the same mount.
+Two modes, both driven by `run_vault`:
+
+- shared=False: unshare + gocryptfs + bwrap in one exec chain. A flock on the
+  project lockfile detects concurrent sessions and prompts before joining.
+- shared=True: the first terminal acquires the flock and re-execs into `serve`,
+  which mounts gocryptfs, forks the primary bwrap via `_pty_proxy`, and listens
+  on a unix socket for additional terminals to attach. When the primary exits,
+  all attached clients are torn down and the mount is released. No background
+  daemon — the serve process stays in the foreground of the terminal that
+  launched it.
 """
 
 from __future__ import annotations
 
 import fcntl
 import getpass
+import hmac
 import json
 import os
 import secrets
@@ -37,7 +43,7 @@ class VaultConfig:
 
 
 def _runtime_dir() -> Path:
-    """Runtime directory for sockets and lock/pid files."""
+    """Runtime directory for sockets and lock files."""
     d = Path(f"/tmp/pwrap-{os.getuid()}")
     d.mkdir(mode=0o700, exist_ok=True)
     return d
@@ -49,18 +55,6 @@ def _lock_path(project: str) -> Path:
 
 def _sock_path(project: str) -> Path:
     return _runtime_dir() / f"{project}.sock"
-
-
-def _pid_path(project: str) -> Path:
-    return _runtime_dir() / f"{project}.pid"
-
-
-def _is_process_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def _try_lock(project: str) -> int | None:
@@ -76,10 +70,9 @@ def _try_lock(project: str) -> int | None:
 
 
 def _check_concurrent(project: str) -> int | None:
-    """Check if another session is active.
+    """Check if another non-shared session is active.
 
-    Returns lock fd if acquired (caller holds lock), or None if user aborted.
-    Prompts for confirmation if another session holds the lock.
+    Returns a lock fd (exclusive or shared). None if the user aborted.
     """
     fd = _try_lock(project)
     if fd is not None:
@@ -96,44 +89,12 @@ def _check_concurrent(project: str) -> int | None:
         print()
         return None
 
-    # Acquire a shared lock (allows concurrent, but still tracks participation)
     fd = os.open(str(_lock_path(project)), os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(fd, fcntl.LOCK_SH)
     return fd
 
 
-# --- Single session mode (shared=False) ---
-
-
-def run_single(config: VaultConfig, bwrap_argv: list[str]) -> int:
-    """Run bwrap inside an isolated unshare+gocryptfs namespace.
-
-    Does not return on success (execs into unshare).
-    """
-    lock_fd = _check_concurrent(config.project_name)
-    if lock_fd is None:
-        return 130  # same as KeyboardInterrupt
-    # Keep lock fd open through exec so flock is held for the session lifetime
-    os.set_inheritable(lock_fd, True)
-
-    # Build the inner command: mount gocryptfs, then exec bwrap
-    bwrap_cmd = " ".join(shlex.quote(a) for a in bwrap_argv)
-    inner = (
-        f"gocryptfs {shlex.quote(str(config.cipherdir))} "
-        f"{shlex.quote(str(config.mountpoint))} && "
-        f"exec {bwrap_cmd}"
-    )
-
-    argv = [
-        "unshare", "--user", "--mount", "--map-root-user",
-        "--", "sh", "-c", inner,
-    ]
-
-    os.execvp("unshare", argv)
-    return 1  # unreachable after exec
-
-
-# --- Shared session mode (shared=True, daemon) ---
+# --- fd passing helpers ---
 
 
 def _send_fds(sock: socket.socket, fds: list[int], data: bytes) -> None:
@@ -162,210 +123,175 @@ def _recv_fds(sock: socket.socket, maxfds: int = 3) -> tuple[bytes, list[int]]:
     return msg, fds
 
 
-def daemon_serve(
-    config: VaultConfig,
-    token_write_fd: int,
-    sock_path: Path,
-    pid_path: Path,
-) -> None:
-    """Daemon: hold gocryptfs mount, accept bwrap spawn requests via unix socket.
+# --- pty proxy ---
 
-    This function is called inside an unshare namespace (re-exec'd).
-    Paths are passed explicitly because uid remaps to 0 inside unshare.
+
+def _pty_proxy(bwrap_argv: list[str], client_fds: list[int]) -> None:
+    """Run bwrap inside a pty and proxy I/O to client fds.
+
+    Gives the shell a proper controlling terminal (needed for fish job control).
+    Runs in a forked child of serve — does not return; exits with bwrap's status.
     """
+    import pty
+    import select
+    import termios
+    import tty
 
-    # Generate auth token and send to first client via pipe
-    token = secrets.token_hex(16)
-    if token_write_fd >= 0:
-        os.write(token_write_fd, token.encode())
-        os.close(token_write_fd)
+    client_in, client_out = client_fds[0], client_fds[1]
 
-    # Clean up stale socket
-    sock_path.unlink(missing_ok=True)
+    try:
+        old_attrs = termios.tcgetattr(client_in)
+    except termios.error:
+        old_attrs = None
 
-    # Mount gocryptfs (password prompt goes to current terminal)
-    result = subprocess.run(["gocryptfs", str(config.cipherdir), str(config.mountpoint)])
-    if result.returncode != 0:
-        raise SystemExit(f"Failed to mount encrypted volume: {config.cipherdir}")
+    try:
+        winsize = fcntl.ioctl(client_in, termios.TIOCGWINSZ, b"\x00" * 8)
+    except OSError:
+        winsize = None
 
-    # Write PID and create socket
-    pid_path.write_text(str(os.getpid()))
+    bwrap_pid, pty_fd = pty.fork()
+    if bwrap_pid == 0:
+        os.execvp(bwrap_argv[0], bwrap_argv)
+        sys.exit(1)
 
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(sock_path))
-    os.chmod(str(sock_path), 0o600)
-    server.listen(5)
-    server.settimeout(1.0)
+    if winsize:
+        fcntl.ioctl(pty_fd, termios.TIOCSWINSZ, winsize)
 
-    children: dict[int, socket.socket] = {}  # pid -> client socket
-
-    def reap_children() -> None:
-        for pid in list(children):
-            result = os.waitpid(pid, os.WNOHANG)
-            if result[0] != 0:
-                status = os.WEXITSTATUS(result[1]) if os.WIFEXITED(result[1]) else 1
-                client = children.pop(pid)
-                try:
-                    client.sendall(struct.pack("!i", status))
-                except OSError:
-                    pass
-                finally:
-                    client.close()
-
-    # Ignore SIGCHLD — we poll with WNOHANG
-    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    if old_attrs:
+        tty.setraw(client_in)
 
     try:
         while True:
-            reap_children()
-
-            try:
-                client, _ = server.accept()
-            except TimeoutError:
-                # If no children and no pending connections, exit
-                if not children:
-                    # Give a grace period for new connections
-                    time.sleep(2)
-                    reap_children()
-                    if not children:
-                        break
-                continue
-
-            # Receive auth token + bwrap argv + terminal fds
-            data, fds = _recv_fds(client, maxfds=3)
-            if len(fds) < 3 or not data:
-                client.close()
-                for fd in fds:
-                    os.close(fd)
-                continue
-
-            msg = json.loads(data)
-
-            # Verify token
-            if msg.get("token") != token:
-                time.sleep(1)
+            rfds, _, _ = select.select([pty_fd, client_in], [], [], 1.0)
+            if pty_fd in rfds:
                 try:
-                    client.sendall(json.dumps({"error": "invalid token"}).encode())
+                    data = os.read(pty_fd, 4096)
+                    if not data:
+                        break
+                    os.write(client_out, data)
                 except OSError:
-                    pass
-                client.close()
-                for fd in fds:
-                    os.close(fd)
-                continue
-
-            # Inject uid/gid remapping + token into bwrap argv (after "bwrap")
-            bwrap_argv = msg["argv"]
-            extra = [
-                "--unshare-user",
-                "--uid", str(msg["uid"]),
-                "--gid", str(msg["gid"]),
-                "--setenv", "PWRAP_VAULT_TOKEN", token,
-            ]
-            bwrap_argv[1:1] = extra
-
-            pid = os.fork()
-            if pid == 0:
-                # Child: dup fds to stdin/stdout/stderr, exec bwrap
-                server.close()
-                os.dup2(fds[0], 0)
-                os.dup2(fds[1], 1)
-                os.dup2(fds[2], 2)
-                for fd in fds:
-                    os.close(fd)
-                os.execvp(bwrap_argv[0], bwrap_argv)
-                sys.exit(1)  # unreachable
-            else:
-                # Parent: track child, close passed fds
-                for fd in fds:
-                    os.close(fd)
-                children[pid] = client
-
+                    break
+            if client_in in rfds:
+                try:
+                    data = os.read(client_in, 4096)
+                    if not data:
+                        break
+                    os.write(pty_fd, data)
+                except OSError:
+                    break
+    except Exception:
+        pass
     finally:
-        # Unmount and clean up
-        subprocess.run(["fusermount", "-u", str(config.mountpoint)], capture_output=True)
-        sock_path.unlink(missing_ok=True)
-        pid_path.unlink(missing_ok=True)
-        server.close()
-
-
-def _start_daemon(config: VaultConfig) -> str:
-    """Start the vault daemon in the background. Returns the auth token."""
-    sock = _sock_path(config.project_name)
-
-    # Pipe for token handshake: daemon writes token, parent reads it
-    r_fd, w_fd = os.pipe()
-
-    # Fork: parent waits for token + socket, child execs into unshare+daemon
-    pid = os.fork()
-    if pid == 0:
-        # Child: exec into unshare + daemon
-        os.close(r_fd)
-        # Clear close-on-exec so the fd survives through unshare → python exec chain
-        os.set_inheritable(w_fd, True)
-        argv = [
-            "unshare", "--user", "--mount", "--map-root-user",
-            "--", sys.executable, "-m", "project_wrap.vault",
-            "serve",
-            "--cipherdir", str(config.cipherdir),
-            "--mountpoint", str(config.mountpoint),
-            "--project", config.project_name,
-            "--token-fd", str(w_fd),
-            "--sock-path", str(_sock_path(config.project_name)),
-            "--pid-path", str(_pid_path(config.project_name)),
-        ]
-        os.execvp("unshare", argv)
-        sys.exit(1)
-
-    # Parent: read token from pipe, then wait for socket
-    os.close(w_fd)
-    token = os.read(r_fd, 256).decode().strip()
-    os.close(r_fd)
-
-    if not token:
-        raise SystemExit("Failed to receive vault token from daemon")
-
-    for _ in range(60):  # 60 seconds timeout (gocryptfs password prompt)
-        if sock.exists():
-            return token
-        time.sleep(1)
-
-    raise SystemExit("Timeout waiting for vault daemon to start")
-
-
-def run_shared(config: VaultConfig, bwrap_argv: list[str]) -> int:
-    """Connect to (or start) daemon, spawn bwrap, wait for exit."""
-    sock_path = _sock_path(config.project_name)
-    pid_path = _pid_path(config.project_name)
-
-    # Check if daemon is alive
-    daemon_alive = False
-    if pid_path.exists():
+        if old_attrs:
+            try:
+                termios.tcsetattr(client_in, termios.TCSAFLUSH, old_attrs)
+            except termios.error:
+                pass
         try:
-            pid = int(pid_path.read_text().strip())
-            daemon_alive = _is_process_alive(pid)
-        except (ValueError, OSError):
+            os.close(pty_fd)
+        except OSError:
             pass
+        for fd in client_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
-    if not daemon_alive:
-        sock_path.unlink(missing_ok=True)
-        pid_path.unlink(missing_ok=True)
-        token = _start_daemon(config)
-        print(f"Vault token: {token}")
-    else:
-        token = getpass.getpass("Vault token: ")
+    try:
+        _, status = os.waitpid(bwrap_pid, 0)
+        code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+    except ChildProcessError:
+        code = 1
+    sys.exit(code)
 
-    # Connect and send authenticated request + terminal fds
+
+# --- entry point ---
+
+
+def run_vault(config: VaultConfig, bwrap_argv: list[str]) -> int:
+    """Unified vault entry. Does not return on success for the primary path."""
+    if not config.shared:
+        return _run_single(config, bwrap_argv)
+
+    lock_fd = _try_lock(config.project_name)
+    if lock_fd is not None:
+        _exec_primary_serve(config, bwrap_argv, lock_fd)
+        return 1  # unreachable
+
+    return _attach_to_primary(config, bwrap_argv)
+
+
+def _run_single(config: VaultConfig, bwrap_argv: list[str]) -> int:
+    """shared=False path: one unshare + gocryptfs + bwrap exec chain."""
+    lock_fd = _check_concurrent(config.project_name)
+    if lock_fd is None:
+        return 130
+    os.set_inheritable(lock_fd, True)
+
+    bwrap_cmd = " ".join(shlex.quote(a) for a in bwrap_argv)
+    inner = (
+        f"gocryptfs {shlex.quote(str(config.cipherdir))} "
+        f"{shlex.quote(str(config.mountpoint))} && "
+        f"exec {bwrap_cmd}"
+    )
+    argv = [
+        "unshare", "--user", "--mount", "--map-root-user",
+        "--", "sh", "-c", inner,
+    ]
+    os.execvp("unshare", argv)
+    return 1  # unreachable
+
+
+def _exec_primary_serve(
+    config: VaultConfig, bwrap_argv: list[str], lock_fd: int
+) -> None:
+    """Re-exec into `unshare ... python -m project_wrap.vault serve ...`.
+
+    The flock fd is kept inheritable so the lock persists across the exec chain
+    for the entire lifetime of the primary session.
+    """
+    os.set_inheritable(lock_fd, True)
+    sock = _sock_path(config.project_name)
+    argv = [
+        "unshare", "--user", "--mount", "--map-root-user",
+        "--", sys.executable, "-m", "project_wrap.vault", "serve",
+        "--cipherdir", str(config.cipherdir),
+        "--mountpoint", str(config.mountpoint),
+        "--project", config.project_name,
+        "--sock-path", str(sock),
+        "--bwrap-argv", json.dumps(bwrap_argv),
+    ]
+    os.execvp("unshare", argv)
+
+
+def _attach_to_primary(config: VaultConfig, bwrap_argv: list[str]) -> int:
+    """Non-primary path: connect to the primary's socket and run as a child."""
+    sock_path = _sock_path(config.project_name)
+
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.connect(str(sock_path))
+    connected = False
+    for _ in range(10):
+        try:
+            client.connect(str(sock_path))
+            connected = True
+            break
+        except (FileNotFoundError, ConnectionRefusedError):
+            time.sleep(0.2)
+    if not connected:
+        print(
+            f"Primary vault session for '{config.project_name}' exists but is "
+            "not accepting connections. Try again in a moment.",
+            file=sys.stderr,
+        )
+        return 1
 
+    token = getpass.getpass("Vault token: ")
     data = json.dumps({
-        "token": token, "argv": bwrap_argv,
-        "uid": os.getuid(), "gid": os.getgid(),
+        "token": token,
+        "argv": bwrap_argv,
     }).encode()
     _send_fds(client, [0, 1, 2], data)
 
-    # Wait for exit status (4 bytes int) or error response (JSON)
-    # Read until the daemon closes the connection
     chunks: list[bytes] = []
     while True:
         chunk = client.recv(4096)
@@ -376,7 +302,6 @@ def run_shared(config: VaultConfig, bwrap_argv: list[str]) -> int:
     response = b"".join(chunks)
 
     if len(response) >= 4:
-        # Check for JSON error first (longer than 4 bytes)
         if len(response) > 4:
             try:
                 msg = json.loads(response)
@@ -390,7 +315,225 @@ def run_shared(config: VaultConfig, bwrap_argv: list[str]) -> int:
     return 1
 
 
-# --- CLI entry point for daemon re-exec ---
+# --- serve (primary, runs inside unshare namespace) ---
+
+
+def _inject_token(bwrap_argv: list[str], token: str) -> list[str]:
+    """Inject PWRAP_VAULT_TOKEN via bwrap --setenv."""
+    argv = list(bwrap_argv)
+    argv[1:1] = ["--setenv", "PWRAP_VAULT_TOKEN", token]
+    return argv
+
+
+def serve(config: VaultConfig, sock_path: Path, bwrap_argv: list[str]) -> None:
+    """Primary session: mount, fork primary bwrap, accept attached clients.
+
+    Called via `python -m project_wrap.vault serve ...` after unshare. Runs in
+    the foreground of the launching terminal. Exits with the primary bwrap's
+    exit status after tearing down any attached clients and unmounting.
+    """
+    # Mount gocryptfs (password prompt goes to the primary's tty)
+    result = subprocess.run(
+        ["gocryptfs", str(config.cipherdir), str(config.mountpoint)]
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"Failed to mount encrypted volume: {config.cipherdir}")
+
+    token = secrets.token_hex(16)
+    print(f"Vault token: {token}", flush=True)
+
+    sock_path.unlink(missing_ok=True)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    os.chmod(str(sock_path), 0o600)
+    server.listen(5)
+    server.settimeout(0.2)
+
+    shutting_down = False
+
+    def handle_signal(_signum: int, _frame: object) -> None:
+        nonlocal shutting_down
+        shutting_down = True
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGHUP, handle_signal)
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+
+    primary_argv = _inject_token(bwrap_argv, token)
+
+    primary_pid = os.fork()
+    if primary_pid == 0:
+        server.close()
+        _pty_proxy(primary_argv, [0, 1, 2])
+        sys.exit(1)  # unreachable
+
+    # Parent: redirect stdio so we don't fight the pty-proxied primary for the tty
+    devnull = os.open("/dev/null", os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    os.close(devnull)
+
+    children: dict[int, socket.socket] = {}
+    primary_exit_status = 1
+    primary_reaped = False
+
+    def reap_once() -> None:
+        nonlocal primary_exit_status, primary_reaped
+        while True:
+            try:
+                wpid, wstatus = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                return
+            if wpid == 0:
+                return
+            status = os.WEXITSTATUS(wstatus) if os.WIFEXITED(wstatus) else 1
+            if wpid == primary_pid:
+                primary_exit_status = status
+                primary_reaped = True
+            elif wpid in children:
+                client = children.pop(wpid)
+                try:
+                    client.sendall(struct.pack("!i", status))
+                except OSError:
+                    pass
+                finally:
+                    client.close()
+
+    try:
+        while not shutting_down and not primary_reaped:
+            reap_once()
+            if primary_reaped or shutting_down:
+                break
+
+            try:
+                client, _ = server.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+
+            try:
+                data, fds = _recv_fds(client, maxfds=3)
+            except OSError:
+                client.close()
+                continue
+
+            if len(fds) < 3 or not data:
+                client.close()
+                for fd in fds:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                continue
+
+            try:
+                msg = json.loads(data)
+            except (json.JSONDecodeError, ValueError):
+                client.close()
+                for fd in fds:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                continue
+
+            if not hmac.compare_digest(msg.get("token", ""), token):
+                time.sleep(1)
+                try:
+                    client.sendall(json.dumps({"error": "invalid token"}).encode())
+                except OSError:
+                    pass
+                client.close()
+                for fd in fds:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                continue
+
+            child_argv = _inject_token(msg["argv"], token)
+
+            proxy_pid = os.fork()
+            if proxy_pid == 0:
+                server.close()
+                _pty_proxy(child_argv, fds)
+                sys.exit(1)  # unreachable
+
+            for fd in fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            children[proxy_pid] = client
+    finally:
+        try:
+            server.close()
+        except OSError:
+            pass
+        sock_path.unlink(missing_ok=True)
+
+        for pid in list(children):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+        deadline = time.monotonic() + 0.5
+        while children and time.monotonic() < deadline:
+            for pid in list(children):
+                try:
+                    wpid, wstatus = os.waitpid(pid, os.WNOHANG)
+                except (ChildProcessError, OSError):
+                    children.pop(pid, None)
+                    continue
+                if wpid == pid:
+                    status = (
+                        os.WEXITSTATUS(wstatus) if os.WIFEXITED(wstatus) else 1
+                    )
+                    client = children.pop(pid)
+                    try:
+                        client.sendall(struct.pack("!i", status))
+                    except OSError:
+                        pass
+                    client.close()
+            time.sleep(0.05)
+
+        for pid in list(children):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except (ChildProcessError, OSError):
+                pass
+            client = children.pop(pid, None)
+            if client is not None:
+                try:
+                    client.sendall(struct.pack("!i", 137))
+                except OSError:
+                    pass
+                client.close()
+
+        if not primary_reaped:
+            try:
+                wpid, wstatus = os.waitpid(primary_pid, 0)
+                if wpid == primary_pid:
+                    primary_exit_status = (
+                        os.WEXITSTATUS(wstatus) if os.WIFEXITED(wstatus) else 1
+                    )
+            except (ChildProcessError, OSError):
+                pass
+
+        subprocess.run(
+            ["fusermount", "-u", str(config.mountpoint)], capture_output=True
+        )
+
+    sys.exit(primary_exit_status)
+
+
+# --- CLI entry point for serve re-exec ---
 
 
 def main() -> None:
@@ -402,9 +545,8 @@ def main() -> None:
     parser.add_argument("--cipherdir", required=True)
     parser.add_argument("--mountpoint", required=True)
     parser.add_argument("--project", required=True)
-    parser.add_argument("--token-fd", type=int, required=True)
     parser.add_argument("--sock-path", required=True)
-    parser.add_argument("--pid-path", required=True)
+    parser.add_argument("--bwrap-argv", required=True)
     args = parser.parse_args()
 
     config = VaultConfig(
@@ -413,12 +555,8 @@ def main() -> None:
         project_name=args.project,
         shared=True,
     )
-    daemon_serve(
-        config,
-        token_write_fd=args.token_fd,
-        sock_path=Path(args.sock_path),
-        pid_path=Path(args.pid_path),
-    )
+    bwrap_argv = json.loads(args.bwrap_argv)
+    serve(config, Path(args.sock_path), bwrap_argv)
 
 
 if __name__ == "__main__":
