@@ -4,6 +4,20 @@ pwrap wraps project shell environments in bubblewrap sandboxes, and aims to
 _limit the blast radius_ of e.g. supply chain attacks and protect your production
 infrastructure from your sloppy side project.
 
+
+
+**Why**
+I got tired of my ad-hoc fish bwrap scripts, and I'm increasingly worried about supply chain attacks.
+
+If every side project feels like a potential vector — one [npm|pip|cargo] install away from pwned AWS credentials,
+and custom-wrapping with bwrap and some vault product feels too fragile or too much work, pwrap might help.
+
+**Status**
+pwrap _works_ but has not been tested by anyone but me, and has not been
+reviewed/audited by anyone except Opus 4.6 and codestral. pwrap comes with
+_absolutely no warranty_.
+
+
 **Does:**
 - Launches sandboxed shells with per-project filesystem isolation
 - Hides sensitive paths (credentials, configs, SSH keys) via tmpfs overlays
