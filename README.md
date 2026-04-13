@@ -146,6 +146,53 @@ set -gx AICHAT_CONFIG_DIR vault/aichat
 
 ```
 
+##### Claude Code in sandbox #####
+
+Claude Code writes state to several paths under `~/` (`~/.claude`,
+`~/.claude.json.lock`, `~/.local/state/claude`, `~/.cache/claude-cli-nodejs`,
+`~/.npm`). Rather than making each of these writable, redirect all of Claude's
+state into the project directory:
+
+```toml
+[env]
+CLAUDE_CONFIG_DIR = "vault/claude"   # or any writable path inside the sandbox
+```
+
+This gives each project its own Claude state (settings, history, MCP logs) —
+no leakage between sandboxed projects. With an `[encrypted]` volume, Claude's
+state is encrypted at rest.
+
+##### Maximum isolation #####
+
+Default-deny for both filesystem and environment. Nothing is visible or set
+unless explicitly allowed.
+
+```toml
+[project]
+name = "myproject"
+dir = "~/projects/myproject"
+shell = "/usr/bin/fish"
+
+[sandbox]
+enabled = true
+clean_env = true                  # only PATH/HOME/USER/SHELL/TERM/LANG
+blacklist = [
+    "~",                          # hide all dotfiles and home contents
+    "/mnt",                       # WSL: hide Windows drives
+]
+whitelist = [
+    "~/.config/fish",             # shell config (read-only)
+    "~/.pyenv",                   # python versions (read-only)
+]
+
+[env]
+XDG_DATA_HOME = ".config"        # fish history, tool state → project dir
+```
+
+The project directory is always writable regardless of blacklist. With
+`XDG_DATA_HOME` pointing inside it, fish history and XDG-aware tools write
+their state there instead of the (hidden) home directory.
+
 ##### GUI apps in sandbox #####
 
 To run emacs or other GUI apps inside the sandbox on WSL2:
@@ -231,12 +278,16 @@ When sandboxing is enabled:
 
 - Home is **read-only**; only the project directory is writable
 - Config directory (`~/.config/pwrap`) is always blacklisted
+- Docker socket (`/run/docker.sock`) masked — `connect()` works on
+  ro-bound sockets, so an exposed docker socket is a full escape to root
+- Default template blacklists credential dirs (SSH, GPG, AWS, GCP, Azure,
+  Docker, npm, PyPI) and `/mnt` (WSL Windows drives)
 - PID and IPC namespaces are isolated
 - TIOCSTI injection blocked automatically on kernels < 6.2
-- XDG runtime directory isolated
+- XDG runtime directory isolated (D-Bus, Wayland, keyring sockets)
 - Sandbox dies with parent process
 - Encrypted volumes mount in isolated namespace (invisible on host)
-- All paths in shell commands are quoted to prevent injection
+- Writable paths are auto-created if they don't exist
 
 Run your editor from inside the sandbox if it has any capacity to run
 linters, hooks, or anything else from the project environment. A

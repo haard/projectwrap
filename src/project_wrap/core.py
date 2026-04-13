@@ -118,6 +118,10 @@ def build_bwrap_args(
     uid = os.getuid()
     args.extend(["--tmpfs", f"/run/user/{uid}"])
 
+    # Mask docker socket — connect() works on ro-bound sockets, so this
+    # is a full sandbox escape to root if docker is running
+    args.extend(["--ro-bind-try", "/dev/null", "/run/docker.sock"])
+
     # Always blacklist the config directory (prevents reading other project configs
     # or modifying sandbox rules from inside the sandbox)
     config_dir_resolved = get_config_dir().resolve()
@@ -155,11 +159,7 @@ def build_bwrap_args(
     # Extra writable paths (e.g. ~/.pyenv/shims, ~/.keychain)
     for path in sandbox.get("writable", []):
         p = expand_path(path)
-        if not p.exists():
-            raise SystemExit(
-                f"Writable path does not exist: {p}\n"
-                f"Fix your config or remove this entry."
-            )
+        p.mkdir(parents=True, exist_ok=True)
         mount_path = p.resolve()
         args.extend(["--bind", str(mount_path), str(mount_path)])
 
@@ -203,6 +203,14 @@ def build_bwrap_args(
     # PID namespace isolation (default: on)
     if sandbox.get("unshare_pid", True):
         args.append("--unshare-pid")
+
+    # Clean environment: clear everything, pass through essentials
+    if sandbox.get("clean_env", False):
+        args.append("--clearenv")
+        for var in ("PATH", "HOME", "USER", "SHELL", "TERM", "LANG"):
+            val = os.environ.get(var)
+            if val is not None:
+                args.extend(["--setenv", var, val])
 
     # Set environment variables
     args.extend(["--setenv", "PROJECT_WRAP", "1"])

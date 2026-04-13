@@ -253,12 +253,16 @@ class TestBuildBwrapArgs:
         assert result[idx - 1] == "--bind"
         assert result[idx + 1] == resolved
 
-    def test_writable_nonexistent_raises(self, tmp_path):
-        with pytest.raises(SystemExit, match="Writable path does not exist"):
-            build_bwrap_args(
-                {"writable": [str(tmp_path / "nope")]},
-                tmp_path,
-            )
+    def test_writable_nonexistent_creates_dir(self, tmp_path):
+        nope = tmp_path / "nope"
+        assert not nope.exists()
+        result = build_bwrap_args(
+            {"writable": [str(nope)]},
+            tmp_path,
+        )
+        assert nope.is_dir()
+        assert "--bind" in result
+        assert str(nope) in result
 
     def test_writable_resolves_symlinks(self, tmp_path):
         target = tmp_path / "real"

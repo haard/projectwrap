@@ -88,6 +88,7 @@ _SCHEMA: dict[str, dict[str, type]] = {
         "unshare_net": bool,
         "unshare_pid": bool,
         "new_session": bool,
+        "clean_env": bool,
         "writable": list,
     },
     "encrypted": {"cipherdir": str, "mountpoint": str, "shared": bool},

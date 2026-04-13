@@ -6,11 +6,22 @@ shell = "{shell}"
 [sandbox]
 enabled = {sandbox_enabled}
 # Note: the config directory (~/.config/pwrap) is always blacklisted automatically.
-# blacklist = [                   # Additional paths to hide (overlaid with tmpfs)
-#     "~/.kube",
-#     "~/.aws",
-#     "~/.ssh",
-# ]
+blacklist = [                     # Paths to hide (overlaid with tmpfs)
+    "~/.ssh",                     # SSH keys and agent config
+    "~/.gnupg",                   # GPG keys
+    "~/.aws",                     # AWS credentials and config
+    "~/.kube",                    # Kubernetes contexts and tokens
+    "~/.config/gcloud",           # GCP credentials and auth tokens
+    "~/.azure",                   # Azure CLI credentials
+    "~/.docker",                  # Docker config and auth tokens
+    "~/.npmrc",                   # npm auth tokens
+    "~/.pypirc",                  # PyPI upload tokens
+    "~/.boto",                    # Legacy GCS/S3 credentials
+    "/mnt",                       # WSL: Windows drives. Without this, cmd.exe and
+                                  # powershell.exe are callable via binfmt_misc
+                                  # interop — a full sandbox escape. Add writable
+                                  # entries for /mnt/wslg/... if you need GUI apps.
+]
 # whitelist = [                   # Exceptions to blacklist (bound back)
 #     "~/.kube/{name}",
 # ]
@@ -20,6 +31,8 @@ enabled = {sandbox_enabled}
 # unshare_net = false             # Isolate network namespace
 # unshare_pid = true              # Isolate PID namespace (default: true)
 # new_session = true              # TIOCSTI protection (auto on kernels < 6.2)
+# clean_env = false               # Clear env, pass through only PATH/HOME/USER/
+#                                 # SHELL/TERM/LANG. Add others via [env].
 
 # [env]                             # environment variables (set before shell starts)
 # XDG_DATA_HOME = "vault/.config"  # ~ expanded for values starting with ~/
