@@ -307,6 +307,7 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     project_cfg = config.get("project", {})
     sandbox_cfg = config.get("sandbox", {})
     encrypted_cfg = config.get("encrypted", {})
+    env_cfg: dict[str, str] = config.get("env", {})
     config_dir: Path = config["_config_dir"]
 
     # Resolve settings
@@ -361,8 +362,15 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     init_script = get_init_script(config_dir, shell)
     shell_argv = build_shell_argv(project_dir, config_dir, shell)
 
+    # Expand ~/... in env values
+    resolved_env: dict[str, str] = {}
+    for k, v in env_cfg.items():
+        resolved_env[k] = str(expand_path(v)) if v.startswith("~/") else v
+
     # Non-sandboxed execution
     if not sandbox_enabled:
+        for k, v in resolved_env.items():
+            os.environ[k] = v
         return ProjectExec(
             display_name=display_name,
             program=shell,
@@ -383,6 +391,8 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     )
     if vault_config:
         bwrap_args.extend(["--setenv", "PWRAP_VAULT_DIR", str(vault_config.mountpoint)])
+    for k, v in resolved_env.items():
+        bwrap_args.extend(["--setenv", k, v])
     bwrap_args.extend(shell_argv)
 
     verbose_info = None

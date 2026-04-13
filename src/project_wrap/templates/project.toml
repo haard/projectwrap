@@ -21,6 +21,10 @@ enabled = {sandbox_enabled}
 # unshare_pid = true              # Isolate PID namespace (default: true)
 # new_session = true              # TIOCSTI protection (auto on kernels < 6.2)
 
+# [env]                             # environment variables (set before shell starts)
+# XDG_DATA_HOME = "vault/.config"  # ~ expanded for values starting with ~/
+# AICHAT_CONFIG_DIR = "~/.local/share/aichat"
+
 # [encrypted]                      # gocryptfs encrypted volume (sandbox only)
 # cipherdir = "encrypted"         # Relative to config dir, or absolute
 # mountpoint = "~/.local/share/myapp"  # Where decrypted files appear

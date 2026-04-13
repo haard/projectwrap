@@ -91,6 +91,7 @@ _SCHEMA: dict[str, dict[str, type]] = {
         "writable": list,
     },
     "encrypted": {"cipherdir": str, "mountpoint": str, "shared": bool},
+    "env": None,  # free-form str→str table, validated separately
 }
 
 
@@ -110,6 +111,16 @@ def validate_config(config: dict[str, Any]) -> None:
         value = config[section]
         if not isinstance(value, dict):
             raise SystemExit(f"[{section}] must be a table, got {type(value).__name__}")
+
+        if rules is None:
+            # Free-form str→str table (e.g. [env])
+            for k, v in value.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    raise SystemExit(
+                        f"[{section}].{k}: expected string value, "
+                        f"got {type(v).__name__}"
+                    )
+            continue
 
         unknown_keys = set(value.keys()) - rules.keys()
         if unknown_keys:
