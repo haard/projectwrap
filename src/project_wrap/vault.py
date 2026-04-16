@@ -228,7 +228,10 @@ def _run_single(config: VaultConfig, bwrap_argv: list[str]) -> int:
         return 130
     os.set_inheritable(lock_fd, True)
 
-    bwrap_cmd = " ".join(shlex.quote(a) for a in bwrap_argv)
+    # Capture real uid/gid before entering --map-root-user namespace; inject
+    # into bwrap so the sandbox shell drops back to the real user identity.
+    bwrap_with_uid = _inject_uid(bwrap_argv, os.getuid(), os.getgid())
+    bwrap_cmd = " ".join(shlex.quote(a) for a in bwrap_with_uid)
     inner = (
         f"gocryptfs {shlex.quote(str(config.cipherdir))} "
         f"{shlex.quote(str(config.mountpoint))} && "
@@ -240,6 +243,31 @@ def _run_single(config: VaultConfig, bwrap_argv: list[str]) -> int:
     ]
     os.execvp("unshare", argv)
     return 1  # unreachable
+
+
+def _inject_uid(bwrap_argv: list[str], uid: int, gid: int) -> list[str]:
+    """Inject --unshare-user --uid --gid so bwrap drops back to the real uid.
+
+    User-namespace mapping chain for the vault path:
+
+      1. Outer: `unshare --user --map-root-user` maps real uid -> 0 so we can
+         mount gocryptfs (FUSE requires "root" in the user ns).
+      2. gocryptfs mounts; files inside it are owned by uid 0 in the outer ns
+         (= the real uid on the host kernel).
+      3. bwrap creates a nested user ns via `--unshare-user` and writes a
+         uid_map of {outer 0 -> nested REAL_UID}. We can only do this because
+         we are "root" in the outer ns, which can write arbitrary mappings
+         for a child ns.
+      4. Processes inside the sandbox see files owned by REAL_UID and
+         `id -u` / `whoami` report the real user — not root.
+
+    Requires bwrap >= 0.4 with --unshare-user and --uid support; this is
+    verified at startup by deps._probe_bwrap. The end-to-end chain is
+    exercised by tests/test_vault_integration.py.
+    """
+    argv = list(bwrap_argv)
+    argv[1:1] = ["--unshare-user", "--uid", str(uid), "--gid", str(gid)]
+    return argv
 
 
 def _exec_primary_serve(
@@ -259,6 +287,8 @@ def _exec_primary_serve(
         "--mountpoint", str(config.mountpoint),
         "--project", config.project_name,
         "--sock-path", str(sock),
+        "--real-uid", str(os.getuid()),
+        "--real-gid", str(os.getgid()),
         "--bwrap-argv", json.dumps(bwrap_argv),
     ]
     os.execvp("unshare", argv)
@@ -325,7 +355,13 @@ def _inject_token(bwrap_argv: list[str], token: str) -> list[str]:
     return argv
 
 
-def serve(config: VaultConfig, sock_path: Path, bwrap_argv: list[str]) -> None:
+def serve(
+    config: VaultConfig,
+    sock_path: Path,
+    bwrap_argv: list[str],
+    real_uid: int,
+    real_gid: int,
+) -> None:
     """Primary session: mount, fork primary bwrap, accept attached clients.
 
     Called via `python -m project_wrap.vault serve ...` after unshare. Runs in
@@ -359,7 +395,7 @@ def serve(config: VaultConfig, sock_path: Path, bwrap_argv: list[str]) -> None:
     signal.signal(signal.SIGHUP, handle_signal)
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
 
-    primary_argv = _inject_token(bwrap_argv, token)
+    primary_argv = _inject_uid(_inject_token(bwrap_argv, token), real_uid, real_gid)
 
     primary_pid = os.fork()
     if primary_pid == 0:
@@ -452,7 +488,9 @@ def serve(config: VaultConfig, sock_path: Path, bwrap_argv: list[str]) -> None:
                         pass
                 continue
 
-            child_argv = _inject_token(msg["argv"], token)
+            child_argv = _inject_uid(
+                _inject_token(msg["argv"], token), real_uid, real_gid
+            )
 
             proxy_pid = os.fork()
             if proxy_pid == 0:
@@ -546,6 +584,8 @@ def main() -> None:
     parser.add_argument("--mountpoint", required=True)
     parser.add_argument("--project", required=True)
     parser.add_argument("--sock-path", required=True)
+    parser.add_argument("--real-uid", type=int, required=True)
+    parser.add_argument("--real-gid", type=int, required=True)
     parser.add_argument("--bwrap-argv", required=True)
     args = parser.parse_args()
 
@@ -556,7 +596,7 @@ def main() -> None:
         shared=True,
     )
     bwrap_argv = json.loads(args.bwrap_argv)
-    serve(config, Path(args.sock_path), bwrap_argv)
+    serve(config, Path(args.sock_path), bwrap_argv, args.real_uid, args.real_gid)
 
 
 if __name__ == "__main__":

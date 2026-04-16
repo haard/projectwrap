@@ -19,11 +19,13 @@ blacklist = [                     # Paths to hide (overlaid with tmpfs)
     "~/.boto",                    # Legacy GCS/S3 credentials
     "/mnt",                       # WSL: Windows drives. Without this, cmd.exe and
                                   # powershell.exe are callable via binfmt_misc
-                                  # interop — a full sandbox escape. Add writable
-                                  # entries for /mnt/wslg/... if you need GUI apps.
+                                  # interop — a full sandbox escape.
 ]
-# whitelist = [                   # Exceptions to blacklist (bound back)
+# whitelist = [                   # Exceptions to blacklist (bound back read-only)
 #     "~/.kube/{name}",
+#     "/mnt/wsl",                  # WSL config — /etc/resolv.conf symlinks here,
+#                                  # so DNS breaks without it when /mnt is blacklisted.
+#                                  # Add "/mnt/wslg/..." writable for GUI apps.
 # ]
 # writable = [                    # Extra writable paths (home is read-only)
 #     "~/.pyenv/shims",
@@ -44,6 +46,3 @@ blacklist = [                     # Paths to hide (overlaid with tmpfs)
 # shared = false                  # true = share one mount across terminals; first
 #                                 # terminal is primary, attached terminals die with it.
 # Inside the sandbox, $PWRAP_VAULT_DIR points at the mountpoint.
-# Note: encrypted volumes require unshare --user --map-root-user, so
-# `whoami` / `id -u` will report root inside the sandbox (user namespace only,
-# not real root).

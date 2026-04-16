@@ -128,7 +128,7 @@ def build_bwrap_args(
     if config_dir_resolved.exists():
         args.extend(["--tmpfs", str(config_dir_resolved)])
 
-    # Blacklist paths by overlaying with tmpfs
+    # Blacklist paths by overlaying with tmpfs (dirs) or /dev/null (files)
     blacklist_paths: list[Path] = [config_dir_resolved]
     for path in sandbox.get("blacklist", []):
         p = expand_path(path)
@@ -139,7 +139,10 @@ def build_bwrap_args(
             )
         # bwrap can't mount tmpfs over symlinks — resolve to the real path
         mount_path = p.resolve()
-        args.extend(["--tmpfs", str(mount_path)])
+        if mount_path.is_file():
+            args.extend(["--ro-bind", "/dev/null", str(mount_path)])
+        else:
+            args.extend(["--tmpfs", str(mount_path)])
         blacklist_paths.append(mount_path)
 
     # Whitelist paths by binding them back (must be under a blacklisted path)
@@ -159,7 +162,8 @@ def build_bwrap_args(
     # Extra writable paths (e.g. ~/.pyenv/shims, ~/.keychain)
     for path in sandbox.get("writable", []):
         p = expand_path(path)
-        p.mkdir(parents=True, exist_ok=True)
+        if not p.exists():
+            p.mkdir(parents=True, exist_ok=True)
         mount_path = p.resolve()
         args.extend(["--bind", str(mount_path), str(mount_path)])
 

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "projectwrap"
-version = "202604.2a0"
+version = "202604.3"
 description = "Isolated project environments with bubblewrap sandboxing"
 readme = "README.md"
 license = "MIT"
@@ -55,3 +55,7 @@ strict = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"
+markers = [
+    "integration: end-to-end tests that exec bwrap/gocryptfs/unshare (opt-in)",
+    "real_probe: tests that exercise the real bwrap feature probe (not stubbed)",
+]
