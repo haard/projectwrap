@@ -8,7 +8,8 @@ infrastructure from your sloppy side project.
 
 ### Why ###
 
-I got tired of my ad-hoc fish bwrap scripts, and I'm increasingly worried about supply chain attacks.
+I got tired of my ad-hoc fish bwrap scripts, I'm increasingly worried about supply chain attacks, 
+and Claude Code "auto mode" is just not made to run without isolation.
 
 If every side project feels like a potential vector — one [npm|pip|cargo] install away from pwned AWS credentials,
 and custom-wrapping with bwrap and some vault product feels too fragile or too much work, pwrap might help.
