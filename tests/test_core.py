@@ -588,11 +588,11 @@ class TestBlacklistErrors:
 
         result = build_bwrap_args(
             {"blacklist": [str(existing)]},
-            {},
             tmp_path,
         )
 
-        assert str(existing) in result
+        idx = result.index(str(existing))
+        assert result[idx - 1] == "--tmpfs"
 
 
 class TestValidateShell:

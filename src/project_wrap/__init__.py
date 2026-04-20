@@ -1,3 +1,8 @@
 """project-wrap: Isolated project environments with bubblewrap sandboxing."""
 
-__version__ = "202604.1"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("projectwrap")
+except PackageNotFoundError:
+    __version__ = "0+unknown"

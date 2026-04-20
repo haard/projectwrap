@@ -72,7 +72,10 @@ def _try_lock(project: str) -> int | None:
 def _check_concurrent(project: str) -> int | None:
     """Check if another non-shared session is active.
 
-    Returns a lock fd (exclusive or shared). None if the user aborted.
+    Returns an fd on the lockfile. If another session already holds LOCK_EX,
+    prompt the user; on consent, return an unlocked fd — the primary's
+    LOCK_EX is already sufficient for future sessions to detect concurrency
+    via _try_lock. None if the user aborted.
     """
     fd = _try_lock(project)
     if fd is not None:
@@ -89,9 +92,8 @@ def _check_concurrent(project: str) -> int | None:
         print()
         return None
 
-    fd = os.open(str(_lock_path(project)), os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_SH)
-    return fd
+    # LOCK_SH would block on the primary's LOCK_EX — return an unlocked fd.
+    return os.open(str(_lock_path(project)), os.O_CREAT | os.O_RDWR, 0o600)
 
 
 # --- fd passing helpers ---
