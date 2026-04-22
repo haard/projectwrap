@@ -27,8 +27,14 @@ blacklist = [                     # Paths to hide (overlaid with tmpfs)
 #                                  # so DNS breaks without it when /mnt is blacklisted.
 #                                  # Add "/mnt/wslg/..." writable for GUI apps.
 # ]
-# writable = [                    # Extra writable paths (home is read-only)
+# writable = [                    # Extra writable paths (home is read-only).
 #     "~/.pyenv/shims",
+#     # To enable docker inside the sandbox, uncomment the matching socket
+#     # below (this overrides the default docker-socket mask):
+#     # "/run/docker.sock",                   # system docker
+#     # "/var/run/docker.sock",               # alt system docker
+#     # "~/.docker/desktop/docker-cli.sock",  # Docker Desktop (Linux)
+#     # "~/.docker/run/docker.sock",          # Docker Desktop alt
 # ]
 # unshare_net = false             # Isolate network namespace
 # unshare_pid = true              # Isolate PID namespace (default: true)

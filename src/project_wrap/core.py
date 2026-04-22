@@ -34,6 +34,14 @@ class ProjectExec:
     vault_config: VaultConfig | None = None
 
 
+_DOCKER_SOCKET_CANDIDATES = [
+    "/run/docker.sock",
+    "/var/run/docker.sock",
+    "~/.docker/desktop/docker-cli.sock",
+    "~/.docker/run/docker.sock",
+]
+
+
 def get_config_dir() -> Path:
     """Get the project configuration directory."""
     # Support XDG, fall back to ~/.config
@@ -118,9 +126,13 @@ def build_bwrap_args(
     uid = os.getuid()
     args.extend(["--tmpfs", f"/run/user/{uid}"])
 
-    # Mask docker socket — connect() works on ro-bound sockets, so this
-    # is a full sandbox escape to root if docker is running
-    args.extend(["--ro-bind-try", "/dev/null", "/run/docker.sock"])
+    # Mask docker sockets — connect() works on ro-bound sockets, so any
+    # accessible socket is a sandbox escape to root if docker is running.
+    # Cover the common locations; add others via writable to override.
+    for sock in _DOCKER_SOCKET_CANDIDATES:
+        sock_path = expand_path(sock)
+        if os.path.lexists(str(sock_path)):
+            args.extend(["--ro-bind", "/dev/null", str(sock_path)])
 
     # Always blacklist the config directory (prevents reading other project configs
     # or modifying sandbox rules from inside the sandbox)
