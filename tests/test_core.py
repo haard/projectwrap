@@ -2,11 +2,10 @@
 
 import os
 import shlex
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
-
 from project_wrap.core import (
     build_bwrap_args,
     build_shell_argv,
