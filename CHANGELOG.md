@@ -12,6 +12,12 @@
   longer produces a duplicate `--ro-bind` that bwrap refuses with "Can't
   create file at /var/run/docker.sock: No such file or directory" —
   `core.py`
+- Docker socket mask now covers WSL Docker Desktop paths
+  (`/mnt/wsl/docker-desktop-bind-mounts/*/docker.sock` and
+  `/mnt/wsl/docker-desktop/shared-sockets/*.sock`). Previously, a project
+  whitelisting `/mnt/wsl` (e.g. to get resolv.conf) had a clean path to the
+  host Docker engine — reachable via `curl --unix-socket …` — which is a
+  full root escape. Candidate list now accepts glob patterns — `core.py`
 
 ## 202604.4
 

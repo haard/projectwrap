@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import os
 import shlex
 import subprocess
@@ -39,6 +40,11 @@ _DOCKER_SOCKET_CANDIDATES = [
     "/var/run/docker.sock",
     "~/.docker/desktop/docker-cli.sock",
     "~/.docker/run/docker.sock",
+    # WSL: Docker Desktop exposes the engine under /mnt/wsl, reachable whenever
+    # the user whitelists /mnt/wsl (e.g. for resolv.conf). Wildcard matches the
+    # distro-named subdir (Ubuntu, Debian, ...) and every shared-socket.
+    "/mnt/wsl/docker-desktop-bind-mounts/*/docker.sock",
+    "/mnt/wsl/docker-desktop/shared-sockets/*.sock",
 ]
 
 
@@ -128,19 +134,19 @@ def build_bwrap_args(
 
     # Mask docker sockets — connect() works on ro-bound sockets, so any
     # accessible socket is a sandbox escape to root if docker is running.
-    # Cover the common locations; add others via writable to override.
-    # Resolve to canonical paths and dedupe: /var/run is a symlink to /run on
-    # modern Linux, and bwrap can't bind through a symlink destination.
+    # Candidates may include wildcards (WSL Docker Desktop paths vary by
+    # distro name). Resolve to canonical paths and dedupe: /var/run is a
+    # symlink to /run on modern Linux, and bwrap can't bind through a
+    # symlink destination. Override via `writable`.
     seen_socks: set[str] = set()
     for sock in _DOCKER_SOCKET_CANDIDATES:
-        sock_path = expand_path(sock)
-        if not os.path.lexists(str(sock_path)):
-            continue
-        resolved = os.path.realpath(str(sock_path))
-        if resolved in seen_socks:
-            continue
-        seen_socks.add(resolved)
-        args.extend(["--ro-bind", "/dev/null", resolved])
+        pattern = str(expand_path(sock))
+        for match in glob.glob(pattern):
+            resolved = os.path.realpath(match)
+            if resolved in seen_socks:
+                continue
+            seen_socks.add(resolved)
+            args.extend(["--ro-bind", "/dev/null", resolved])
 
     # Always blacklist the config directory (prevents reading other project configs
     # or modifying sandbox rules from inside the sandbox)

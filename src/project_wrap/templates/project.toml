@@ -35,6 +35,8 @@ blacklist = [                     # Paths to hide (overlaid with tmpfs)
 #     # "/var/run/docker.sock",               # alt system docker
 #     # "~/.docker/desktop/docker-cli.sock",  # Docker Desktop (Linux)
 #     # "~/.docker/run/docker.sock",          # Docker Desktop alt
+#     # "/mnt/wsl/docker-desktop-bind-mounts/Ubuntu/docker.sock",  # WSL
+#     #                                       # (replace Ubuntu with your distro)
 # ]
 # unshare_net = false             # Isolate network namespace
 # unshare_pid = true              # Isolate PID namespace (default: true)
