@@ -156,6 +156,22 @@ class TestBuildBwrapArgs:
         idx = result.index(runtime_dir)
         assert result[idx - 1] == "--tmpfs"
 
+    def test_docker_socket_masked_when_present(self, tmp_path, monkeypatch):
+        sock = tmp_path / "docker.sock"
+        sock.touch()
+        absent = tmp_path / "nonexistent.sock"
+
+        monkeypatch.setattr(
+            "project_wrap.core._DOCKER_SOCKET_CANDIDATES",
+            [str(sock), str(absent)],
+        )
+        result = build_bwrap_args({}, tmp_path)
+
+        idx = result.index(str(sock))
+        assert result[idx - 1] == "/dev/null"
+        assert result[idx - 2] == "--ro-bind"
+        assert str(absent) not in result
+
     def test_blacklist_args(self, tmp_path):
         blacklist_dir = tmp_path / "secret"
         blacklist_dir.mkdir()

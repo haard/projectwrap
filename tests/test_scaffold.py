@@ -5,7 +5,11 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from project_wrap.scaffold import create_project, ensure_templates
+from project_wrap.scaffold import (
+    _comment_missing_paths,
+    create_project,
+    ensure_templates,
+)
 from project_wrap.validate import check_config_permissions, validate_config
 
 
@@ -207,3 +211,97 @@ class TestEnsureTemplates:
 
         init_content = (result / "init.fish").read_text()
         assert "my custom fish init" in init_content
+
+
+class TestCommentMissingPaths:
+    """Tests for _comment_missing_paths."""
+
+    def test_comments_missing_entry(self, tmp_path):
+        present = tmp_path / "exists"
+        present.mkdir()
+        missing = tmp_path / "nope"
+
+        toml = (
+            "[sandbox]\n"
+            "blacklist = [\n"
+            f'    "{present}",\n'
+            f'    "{missing}",\n'
+            "]\n"
+        )
+        result = _comment_missing_paths(toml)
+
+        assert f'"{present}"' in result
+        assert f'# "{missing}"' in result
+        assert "path not found on host" in result
+
+    def test_leaves_already_commented_lines(self, tmp_path):
+        missing = tmp_path / "nope"
+        toml = (
+            "[sandbox]\n"
+            "blacklist = [\n"
+            f'    # "{missing}",\n'
+            "]\n"
+        )
+        result = _comment_missing_paths(toml)
+
+        assert result.count("#") == 1
+
+    def test_preserves_valid_toml(self, tmp_path):
+        import tomllib as _toml
+
+        missing = tmp_path / "nope"
+        toml = (
+            "[sandbox]\n"
+            "blacklist = [\n"
+            f'    "{missing}",\n'
+            "]\n"
+            "writable = []\n"
+        )
+        result = _comment_missing_paths(toml)
+
+        parsed = _toml.loads(result)
+        assert parsed["sandbox"]["blacklist"] == []
+
+    def test_does_not_touch_other_sections(self, tmp_path):
+        missing = tmp_path / "nope"
+        toml = (
+            "[project]\n"
+            f'dir = "{missing}"\n'
+            "[sandbox]\n"
+            "blacklist = []\n"
+        )
+        result = _comment_missing_paths(toml)
+
+        assert f'dir = "{missing}"' in result
+
+    def test_expands_tilde(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        present = home / "exists"
+        present.mkdir()
+
+        toml = (
+            "[sandbox]\n"
+            "blacklist = [\n"
+            '    "~/exists",\n'
+            '    "~/missing",\n'
+            "]\n"
+        )
+        result = _comment_missing_paths(toml)
+
+        assert '    "~/exists",\n' in result
+        assert '# "~/missing"' in result
+
+    def test_full_default_template_renders_valid_toml(self, tmp_path):
+        """Regression: default template passed through must parse as TOML."""
+        import tomllib as _toml
+
+        from project_wrap.scaffold import _load_package_template
+
+        rendered = _load_package_template("project.toml").format(
+            name="t", dir=str(tmp_path), sandbox_enabled="true", shell="/bin/bash"
+        )
+        commented = _comment_missing_paths(rendered)
+        _toml.loads(commented)  # Should not raise

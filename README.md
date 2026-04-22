@@ -321,8 +321,10 @@ When sandboxing is enabled:
 
 - Home is **read-only**; only the project directory is writable
 - Config directory (`~/.config/pwrap`) is always blacklisted
-- Docker socket (`/run/docker.sock`) masked — `connect()` works on
-  ro-bound sockets, so an exposed docker socket is a full escape to root
+- Docker sockets masked at `/run/docker.sock`, `/var/run/docker.sock`,
+  `~/.docker/desktop/docker-cli.sock`, `~/.docker/run/docker.sock` —
+  `connect()` works on ro-bound sockets, so an exposed docker socket is a
+  full escape to root. Override via `writable` to enable docker access.
 - Default template blacklists credential dirs (SSH, GPG, AWS, GCP, Azure,
   Docker, npm, PyPI) and `/mnt` (WSL Windows drives)
 - PID and IPC namespaces are isolated
