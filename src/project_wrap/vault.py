@@ -342,7 +342,7 @@ def _attach_to_primary(config: VaultConfig, bwrap_argv: list[str]) -> int:
                     return 1
             except (json.JSONDecodeError, ValueError):
                 pass
-        return struct.unpack("!i", response[:4])[0]
+        return int(struct.unpack("!i", response[:4])[0])
 
     return 1
 
@@ -548,13 +548,13 @@ def serve(
                 os.waitpid(pid, 0)
             except (ChildProcessError, OSError):
                 pass
-            client = children.pop(pid, None)
-            if client is not None:
+            if pid in children:
+                leftover = children.pop(pid)
                 try:
-                    client.sendall(struct.pack("!i", 137))
+                    leftover.sendall(struct.pack("!i", 137))
                 except OSError:
                     pass
-                client.close()
+                leftover.close()
 
         if not primary_reaped:
             try:

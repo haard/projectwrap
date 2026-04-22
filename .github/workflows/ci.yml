@@ -26,5 +26,8 @@ jobs:
       - name: Lint (ruff)
         run: poetry run ruff check .
 
+      - name: Type check (mypy)
+        run: poetry run mypy src/project_wrap tests
+
       - name: Test (unit)
         run: poetry run pytest -m "not integration"
