@@ -338,6 +338,14 @@ linters, hooks, or anything else from the project environment. A
 super-protected terminal does nothing if a malicious `.pth` can escape
 via your linter.
 
+**Snap-packaged tools won't run inside the sandbox.** `snap-confine` is setuid
+and requires Linux capabilities (`cap_dac_override` and friends) that bwrap
+strips. You'll see errors like `required permitted capability cap_dac_override
+not found in current capabilities`. Prefer apt or upstream installs — e.g. for
+`gh`, use [GitHub's apt repo](https://github.com/cli/cli/blob/trunk/docs/install_linux.md)
+rather than `snap install gh`. Same applies to any snap binary (VS Code,
+Firefox, etc.) you want to use inside a pwrap shell.
+
 #### Shell Completions ####
 
 ```bash
