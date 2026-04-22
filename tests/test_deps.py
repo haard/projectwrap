@@ -1,6 +1,7 @@
 """Tests for dependency checking module."""
 
 import pytest
+
 from project_wrap import deps as deps_module
 from project_wrap.deps import (
     DEPS,

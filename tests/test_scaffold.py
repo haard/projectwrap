@@ -5,6 +5,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+
 from project_wrap.scaffold import (
     _comment_missing_paths,
     create_project,

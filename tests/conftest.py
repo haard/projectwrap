@@ -1,6 +1,7 @@
 """Shared pytest fixtures."""
 
 import pytest
+
 from project_wrap import core as core_module
 from project_wrap import deps as deps_module
 
