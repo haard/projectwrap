@@ -225,7 +225,7 @@ class TestBuildBwrapArgs:
         )
 
         idx = result.index(str(child))
-        assert result[idx - 1] == "--bind"
+        assert result[idx - 1] == "--ro-bind"
         assert result[idx + 1] == str(child)
 
     def test_whitelist_not_under_blacklist_raises(self, tmp_path):

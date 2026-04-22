@@ -184,7 +184,8 @@ def build_bwrap_args(
             args.extend(["--tmpfs", str(mount_path)])
         blacklist_paths.append(mount_path)
 
-    # Whitelist paths by binding them back (must be under a blacklisted path)
+    # Whitelist paths by binding them back read-only (must be under a
+    # blacklisted path). Use `writable` for an rw exception.
     for path in sandbox.get("whitelist", []):
         p = expand_path(path)
         if not p.exists():
@@ -196,7 +197,7 @@ def build_bwrap_args(
                 f"Whitelist path {p} is not under any blacklisted path. "
                 f"Blacklisted: {[str(bl) for bl in blacklist_paths]}"
             )
-        args.extend(["--bind", str(resolved), str(resolved)])
+        args.extend(["--ro-bind", str(resolved), str(resolved)])
 
     # Extra writable paths (e.g. ~/.pyenv/shims, ~/.keychain)
     for p in writable_expanded:

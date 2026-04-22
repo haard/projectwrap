@@ -1,5 +1,18 @@
 # Changelog
 
+## 202604.4.1a0
+
+- **Breaking:** `whitelist` entries are now bound read-only (`--ro-bind`)
+  instead of read-write (`--bind`). This reduces blast radius of whitelisting
+  broad trees (e.g. `/mnt/wsl` for WSL DNS) where the bound path contains
+  writable sockets or files the sandboxee shouldn't be able to mutate. Use
+  `writable` for rw exceptions — `core.py`
+- Docker socket mask deduplicates candidates by canonical path, so
+  `/var/run/docker.sock` (symlink to `/run/docker.sock` on modern Linux) no
+  longer produces a duplicate `--ro-bind` that bwrap refuses with "Can't
+  create file at /var/run/docker.sock: No such file or directory" —
+  `core.py`
+
 ## 202604.4
 
 - Docker socket mask now covers `/var/run/docker.sock`,
