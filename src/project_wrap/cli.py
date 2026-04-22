@@ -7,12 +7,11 @@ import sys
 
 from . import __version__
 from .core import (
-    create_project,
-    ensure_templates,
     get_config_dir,
     list_projects,
     run_project,
 )
+from .scaffold import create_project, ensure_templates
 from .deps import check_optional_deps
 
 
