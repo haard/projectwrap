@@ -175,6 +175,48 @@ class TestBuildBwrapArgs:
         assert result[idx - 2] == "--ro-bind"
         assert str(absent) not in result
 
+    def test_docker_socket_glob_expansion(self, tmp_path, monkeypatch):
+        shared = tmp_path / "shared-sockets"
+        shared.mkdir()
+        sock_a = shared / "backend.sock"
+        sock_b = shared / "filesystem.sock"
+        sock_a.touch()
+        sock_b.touch()
+        other = shared / "not-a-socket.txt"
+        other.touch()
+
+        monkeypatch.setattr(
+            "project_wrap.core._DOCKER_SOCKET_CANDIDATES",
+            [str(shared / "*.sock")],
+        )
+        result = build_bwrap_args({}, tmp_path)
+
+        for expected in (sock_a, sock_b):
+            resolved = os.path.realpath(str(expected))
+            idx = result.index(resolved)
+            assert result[idx - 1] == "/dev/null"
+            assert result[idx - 2] == "--ro-bind"
+        assert os.path.realpath(str(other)) not in result
+
+    def test_docker_socket_dedup_via_symlink(self, tmp_path, monkeypatch):
+        real_dir = tmp_path / "run"
+        real_dir.mkdir()
+        sock = real_dir / "docker.sock"
+        sock.touch()
+        link_dir = tmp_path / "var_run"
+        link_dir.symlink_to(real_dir)
+        via_link = link_dir / "docker.sock"
+
+        monkeypatch.setattr(
+            "project_wrap.core._DOCKER_SOCKET_CANDIDATES",
+            [str(sock), str(via_link)],
+        )
+        result = build_bwrap_args({}, tmp_path)
+
+        resolved = os.path.realpath(str(sock))
+        assert result.count(resolved) == 1
+        assert str(via_link) not in result
+
     def test_blacklist_args(self, tmp_path):
         blacklist_dir = tmp_path / "secret"
         blacklist_dir.mkdir()
@@ -208,7 +250,7 @@ class TestBuildBwrapArgs:
         )
 
         idx = result.index(str(child))
-        assert result[idx - 1] == "--bind"
+        assert result[idx - 1] == "--ro-bind"
         assert result[idx + 1] == str(child)
 
     def test_whitelist_not_under_blacklist_raises(self, tmp_path):

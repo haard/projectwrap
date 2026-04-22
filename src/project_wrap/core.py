@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import os
 import shlex
 import subprocess
@@ -39,6 +40,11 @@ _DOCKER_SOCKET_CANDIDATES = [
     "/var/run/docker.sock",
     "~/.docker/desktop/docker-cli.sock",
     "~/.docker/run/docker.sock",
+    # WSL: Docker Desktop exposes the engine under /mnt/wsl, reachable whenever
+    # the user whitelists /mnt/wsl (e.g. for resolv.conf). Wildcard matches the
+    # distro-named subdir (Ubuntu, Debian, ...) and every shared-socket.
+    "/mnt/wsl/docker-desktop-bind-mounts/*/docker.sock",
+    "/mnt/wsl/docker-desktop/shared-sockets/*.sock",
 ]
 
 
@@ -128,11 +134,19 @@ def build_bwrap_args(
 
     # Mask docker sockets — connect() works on ro-bound sockets, so any
     # accessible socket is a sandbox escape to root if docker is running.
-    # Cover the common locations; add others via writable to override.
+    # Candidates may include wildcards (WSL Docker Desktop paths vary by
+    # distro name). Resolve to canonical paths and dedupe: /var/run is a
+    # symlink to /run on modern Linux, and bwrap can't bind through a
+    # symlink destination. Override via `writable`.
+    seen_socks: set[str] = set()
     for sock in _DOCKER_SOCKET_CANDIDATES:
-        sock_path = expand_path(sock)
-        if os.path.lexists(str(sock_path)):
-            args.extend(["--ro-bind", "/dev/null", str(sock_path)])
+        pattern = str(expand_path(sock))
+        for match in glob.glob(pattern):
+            sock_real = os.path.realpath(match)
+            if sock_real in seen_socks:
+                continue
+            seen_socks.add(sock_real)
+            args.extend(["--ro-bind", "/dev/null", sock_real])
 
     # Always blacklist the config directory (prevents reading other project configs
     # or modifying sandbox rules from inside the sandbox)
@@ -176,7 +190,8 @@ def build_bwrap_args(
             args.extend(["--tmpfs", str(mount_path)])
         blacklist_paths.append(mount_path)
 
-    # Whitelist paths by binding them back (must be under a blacklisted path)
+    # Whitelist paths by binding them back read-only (must be under a
+    # blacklisted path). Use `writable` for an rw exception.
     for path in sandbox.get("whitelist", []):
         p = expand_path(path)
         if not p.exists():
@@ -188,7 +203,7 @@ def build_bwrap_args(
                 f"Whitelist path {p} is not under any blacklisted path. "
                 f"Blacklisted: {[str(bl) for bl in blacklist_paths]}"
             )
-        args.extend(["--bind", str(resolved), str(resolved)])
+        args.extend(["--ro-bind", str(resolved), str(resolved)])
 
     # Extra writable paths (e.g. ~/.pyenv/shims, ~/.keychain)
     for p in writable_expanded:
