@@ -65,18 +65,30 @@ def check_config_permissions(config_file: Path) -> None:
     """Check config file and parent directory permissions, refuse insecure files."""
     # Check parent directory
     parent = config_file.parent
-    parent_mode = parent.stat().st_mode
+    parent_mode = parent.stat().st_mode & 0o777
     if parent_mode & 0o002:
-        raise SystemExit(f"Config directory is world-writable, refusing to load: {parent}")
+        raise SystemExit(
+            f"Config directory is world-writable (mode {parent_mode:04o}), "
+            f"refusing to load: chmod 0700 {parent}"
+        )
     if parent_mode & 0o020:
-        raise SystemExit(f"Config directory is group-writable, refusing to load: {parent}")
+        raise SystemExit(
+            f"Config directory is group-writable (mode {parent_mode:04o}), "
+            f"refusing to load: chmod 0700 {parent}"
+        )
 
     # Check file
-    mode = config_file.stat().st_mode
+    mode = config_file.stat().st_mode & 0o777
     if mode & 0o002:
-        raise SystemExit(f"Config file is world-writable, refusing to load: {config_file}")
+        raise SystemExit(
+            f"Config file is world-writable (mode {mode:04o}), "
+            f"refusing to load: chmod 0600 {config_file}"
+        )
     if mode & 0o020:
-        raise SystemExit(f"Config file is group-writable, refusing to load: {config_file}")
+        raise SystemExit(
+            f"Config file is group-writable (mode {mode:04o}), "
+            f"refusing to load: chmod 0600 {config_file}"
+        )
 
 
 _SCHEMA: dict[str, dict[str, type]] = {

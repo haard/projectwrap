@@ -535,14 +535,20 @@ def create_project(
     )
 
     config_dir.mkdir(parents=True)
-    (config_dir / "project.toml").write_text(toml)
+    config_dir.chmod(0o700)
+    project_toml = config_dir / "project.toml"
+    project_toml.write_text(toml)
+    project_toml.chmod(0o600)
 
     # Copy matching init template
     shell_name = Path(shell).name
     if shell_name == "fish":
-        (config_dir / "init.fish").write_text(_load_template("init.fish"))
+        init_path = config_dir / "init.fish"
+        init_path.write_text(_load_template("init.fish"))
     else:
-        (config_dir / "init.sh").write_text(_load_template("init.sh"))
+        init_path = config_dir / "init.sh"
+        init_path.write_text(_load_template("init.sh"))
+    init_path.chmod(0o600)
 
     return config_dir
 

@@ -453,7 +453,7 @@ class TestCheckConfigPermissions:
         config.write_text("[project]\n")
         config.chmod(0o666)
 
-        with pytest.raises(SystemExit, match="world-writable"):
+        with pytest.raises(SystemExit, match="world-writable.*chmod"):
             check_config_permissions(config)
 
     def test_rejects_group_writable(self, tmp_path):
@@ -461,7 +461,7 @@ class TestCheckConfigPermissions:
         config.write_text("[project]\n")
         config.chmod(0o664)
 
-        with pytest.raises(SystemExit, match="group-writable"):
+        with pytest.raises(SystemExit, match="group-writable.*chmod"):
             check_config_permissions(config)
 
     def test_accepts_secure_permissions(self, tmp_path):
@@ -871,6 +871,26 @@ class TestCreateProject:
 
         with pytest.raises(SystemExit, match="Project directory does not exist"):
             create_project(str(tmp_path / "nonexistent"), name="myproj")
+
+    def test_sets_secure_perms_under_permissive_umask(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / "config"
+        project_dir = tmp_path / "work"
+        project_dir.mkdir()
+
+        monkeypatch.setattr("project_wrap.core.get_config_dir", lambda: config_dir)
+
+        old_umask = os.umask(0o002)
+        try:
+            result = create_project(str(project_dir), name="myproj", shell="/usr/bin/fish")
+        finally:
+            os.umask(old_umask)
+
+        assert result.stat().st_mode & 0o777 == 0o700
+        assert (result / "project.toml").stat().st_mode & 0o777 == 0o600
+        assert (result / "init.fish").stat().st_mode & 0o777 == 0o600
+
+        # And the result must pass the permission check it triggered.
+        check_config_permissions(result / "project.toml")
 
 
 class TestBwrapRoBindExtra:
