@@ -142,11 +142,11 @@ def build_bwrap_args(
     for sock in _DOCKER_SOCKET_CANDIDATES:
         pattern = str(expand_path(sock))
         for match in glob.glob(pattern):
-            resolved = os.path.realpath(match)
-            if resolved in seen_socks:
+            sock_real = os.path.realpath(match)
+            if sock_real in seen_socks:
                 continue
-            seen_socks.add(resolved)
-            args.extend(["--ro-bind", "/dev/null", resolved])
+            seen_socks.add(sock_real)
+            args.extend(["--ro-bind", "/dev/null", sock_real])
 
     # Always blacklist the config directory (prevents reading other project configs
     # or modifying sandbox rules from inside the sandbox)
