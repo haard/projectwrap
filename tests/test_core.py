@@ -173,6 +173,25 @@ class TestBuildBwrapArgs:
         assert result[idx - 2] == "--ro-bind"
         assert str(absent) not in result
 
+    def test_docker_socket_dedup_via_symlink(self, tmp_path, monkeypatch):
+        real_dir = tmp_path / "run"
+        real_dir.mkdir()
+        sock = real_dir / "docker.sock"
+        sock.touch()
+        link_dir = tmp_path / "var_run"
+        link_dir.symlink_to(real_dir)
+        via_link = link_dir / "docker.sock"
+
+        monkeypatch.setattr(
+            "project_wrap.core._DOCKER_SOCKET_CANDIDATES",
+            [str(sock), str(via_link)],
+        )
+        result = build_bwrap_args({}, tmp_path)
+
+        resolved = os.path.realpath(str(sock))
+        assert result.count(resolved) == 1
+        assert str(via_link) not in result
+
     def test_blacklist_args(self, tmp_path):
         blacklist_dir = tmp_path / "secret"
         blacklist_dir.mkdir()

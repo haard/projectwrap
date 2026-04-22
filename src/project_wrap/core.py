@@ -129,10 +129,18 @@ def build_bwrap_args(
     # Mask docker sockets — connect() works on ro-bound sockets, so any
     # accessible socket is a sandbox escape to root if docker is running.
     # Cover the common locations; add others via writable to override.
+    # Resolve to canonical paths and dedupe: /var/run is a symlink to /run on
+    # modern Linux, and bwrap can't bind through a symlink destination.
+    seen_socks: set[str] = set()
     for sock in _DOCKER_SOCKET_CANDIDATES:
         sock_path = expand_path(sock)
-        if os.path.lexists(str(sock_path)):
-            args.extend(["--ro-bind", "/dev/null", str(sock_path)])
+        if not os.path.lexists(str(sock_path)):
+            continue
+        resolved = os.path.realpath(str(sock_path))
+        if resolved in seen_socks:
+            continue
+        seen_socks.add(resolved)
+        args.extend(["--ro-bind", "/dev/null", resolved])
 
     # Always blacklist the config directory (prevents reading other project configs
     # or modifying sandbox rules from inside the sandbox)
