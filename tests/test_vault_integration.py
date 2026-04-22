@@ -19,7 +19,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from project_wrap import deps as deps_module
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_probe]
