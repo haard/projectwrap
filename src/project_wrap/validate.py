@@ -91,7 +91,7 @@ def check_config_permissions(config_file: Path) -> None:
         )
 
 
-_SCHEMA: dict[str, dict[str, type]] = {
+_SCHEMA: dict[str, dict[str, type] | None] = {
     "project": {"name": str, "dir": str, "shell": str},
     "sandbox": {
         "enabled": bool,

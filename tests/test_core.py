@@ -9,13 +9,15 @@ import pytest
 from project_wrap.core import (
     build_bwrap_args,
     build_shell_argv,
-    check_config_permissions,
     expand_path,
     get_config_dir,
     get_init_script,
     load_config,
     prepare_project,
     redact_bwrap_args,
+)
+from project_wrap.validate import (
+    check_config_permissions,
     validate_config,
     validate_project_name,
     validate_shell,
