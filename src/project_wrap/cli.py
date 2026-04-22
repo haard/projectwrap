@@ -7,13 +7,12 @@ import sys
 
 from . import __version__
 from .core import (
-    create_project,
-    ensure_templates,
     get_config_dir,
     list_projects,
     run_project,
 )
 from .deps import check_optional_deps
+from .scaffold import create_project, ensure_templates
 
 
 def main(argv: list[str] | None = None) -> int:
