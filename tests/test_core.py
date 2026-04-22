@@ -187,7 +187,7 @@ class TestBuildBwrapArgs:
     def test_blacklist_nonexistent_path_raises(self, tmp_path):
         nonexistent = tmp_path / "does_not_exist"
 
-        with pytest.raises(SystemExit, match="Blacklist path does not exist"):
+        with pytest.raises(SystemExit, match=r"(?s)paths that do not exist.*\[blacklist\]"):
             build_bwrap_args(
                 {"blacklist": [str(nonexistent)]},
                 tmp_path,
@@ -265,16 +265,23 @@ class TestBuildBwrapArgs:
         assert result[idx - 1] == "--bind"
         assert result[idx + 1] == resolved
 
-    def test_writable_nonexistent_creates_dir(self, tmp_path):
+    def test_writable_nonexistent_raises(self, tmp_path):
         nope = tmp_path / "nope"
-        assert not nope.exists()
-        result = build_bwrap_args(
-            {"writable": [str(nope)]},
-            tmp_path,
-        )
-        assert nope.is_dir()
-        assert "--bind" in result
-        assert str(nope) in result
+        with pytest.raises(SystemExit, match=r"(?s)paths that do not exist.*\[writable\]"):
+            build_bwrap_args({"writable": [str(nope)]}, tmp_path)
+        assert not nope.exists()  # must not be created on host
+
+    def test_missing_paths_aggregated(self, tmp_path):
+        miss_bl = tmp_path / "miss_bl"
+        miss_wr = tmp_path / "miss_wr"
+        with pytest.raises(SystemExit) as exc:
+            build_bwrap_args(
+                {"blacklist": [str(miss_bl)], "writable": [str(miss_wr)]},
+                tmp_path,
+            )
+        msg = str(exc.value)
+        assert f"[blacklist] {miss_bl}" in msg
+        assert f"[writable] {miss_wr}" in msg
 
     def test_writable_resolves_symlinks(self, tmp_path):
         target = tmp_path / "real"
@@ -588,7 +595,7 @@ class TestBlacklistErrors:
     def test_rejects_nonexistent_blacklist(self, tmp_path):
         nonexistent = tmp_path / "does_not_exist"
 
-        with pytest.raises(SystemExit, match="Blacklist path does not exist"):
+        with pytest.raises(SystemExit, match=r"(?s)paths that do not exist.*\[blacklist\]"):
             build_bwrap_args(
                 {"blacklist": [str(nonexistent)]},
                 tmp_path,

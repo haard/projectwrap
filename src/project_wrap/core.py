@@ -140,15 +140,34 @@ def build_bwrap_args(
     if config_dir_resolved.exists():
         args.extend(["--tmpfs", str(config_dir_resolved)])
 
-    # Blacklist paths by overlaying with tmpfs (dirs) or /dev/null (files)
-    blacklist_paths: list[Path] = [config_dir_resolved]
+    # Validate blacklist and writable up front so the user sees every missing
+    # path in one error, rather than one-per-run. Whitelist is "exception to
+    # blacklist" and silently skips missing entries by design.
+    missing: list[tuple[str, Path]] = []
+    blacklist_expanded: list[Path] = []
     for path in sandbox.get("blacklist", []):
         p = expand_path(path)
         if not p.exists():
-            raise SystemExit(
-                f"Blacklist path does not exist: {p}\n"
-                f"Fix your config or remove this entry."
-            )
+            missing.append(("blacklist", p))
+        else:
+            blacklist_expanded.append(p)
+    writable_expanded: list[Path] = []
+    for path in sandbox.get("writable", []):
+        p = expand_path(path)
+        if not p.exists():
+            missing.append(("writable", p))
+        else:
+            writable_expanded.append(p)
+    if missing:
+        lines = "\n".join(f"  [{kind}] {p}" for kind, p in missing)
+        raise SystemExit(
+            f"Config references paths that do not exist on this host:\n{lines}\n"
+            f"Fix your config (comment out the missing entries or adjust the paths)."
+        )
+
+    # Blacklist paths by overlaying with tmpfs (dirs) or /dev/null (files)
+    blacklist_paths: list[Path] = [config_dir_resolved]
+    for p in blacklist_expanded:
         # bwrap can't mount tmpfs over symlinks — resolve to the real path
         mount_path = p.resolve()
         if mount_path.is_file():
@@ -172,10 +191,7 @@ def build_bwrap_args(
         args.extend(["--bind", str(resolved), str(resolved)])
 
     # Extra writable paths (e.g. ~/.pyenv/shims, ~/.keychain)
-    for path in sandbox.get("writable", []):
-        p = expand_path(path)
-        if not p.exists():
-            p.mkdir(parents=True, exist_ok=True)
+    for p in writable_expanded:
         mount_path = p.resolve()
         args.extend(["--bind", str(mount_path), str(mount_path)])
 
