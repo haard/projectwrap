@@ -7,28 +7,43 @@ shell = "{shell}"
 enabled = {sandbox_enabled}
 # Note: the config directory (~/.config/pwrap) is always blacklisted automatically.
 blacklist = [                     # Paths to hide (overlaid with tmpfs)
-    "~/.ssh",                     # SSH keys and agent config
-    "~/.gnupg",                   # GPG keys
-    "~/.aws",                     # AWS credentials and config
-    "~/.kube",                    # Kubernetes contexts and tokens
-    "~/.config/gcloud",           # GCP credentials and auth tokens
-    "~/.azure",                   # Azure CLI credentials
-    "~/.docker",                  # Docker config and auth tokens
-    "~/.npmrc",                   # npm auth tokens
-    "~/.pypirc",                  # PyPI upload tokens
-    "~/.boto",                    # Legacy GCS/S3 credentials
-    "/mnt",                       # WSL: Windows drives. Without this, cmd.exe and
-                                  # powershell.exe are callable via binfmt_misc
-                                  # interop — a full sandbox escape.
+    "~",                          # Deny-by-default home. Removing this
+                                  # re-exposes every host credential file
+                                  # (SSH, AWS, GCP, Claude, shell history, ...)
+                                  # — whitelist specific paths back below.
+    "/mnt",                       # WSL: Windows drives. Without this, cmd.exe
+                                  # and powershell.exe are callable via
+                                  # binfmt_misc interop — a full sandbox escape.
 ]
-# whitelist = [                   # Exceptions to blacklist (bound back read-only)
-#     "~/.kube/{name}",
-#     "/mnt/wsl",                  # WSL config — /etc/resolv.conf symlinks here,
-#                                  # so DNS breaks without it when /mnt is blacklisted.
-#                                  # Add "/mnt/wslg/..." writable for GUI apps.
-# ]
-# writable = [                    # Extra writable paths (home is read-only).
-#     "~/.pyenv/shims",
+whitelist = [                     # Read-only exceptions to the blacklist
+    # Shell config — pick the one(s) your shell reads:
+    "~/.config/fish",             # fish: config + completions + functions
+    # "~/.bashrc",                # bash
+    # "~/.zshrc",                 # zsh
+
+    # Git config (most projects need it for commits/auth):
+    "~/.gitconfig",
+
+    # WSL DNS (only when on WSL and /mnt is blacklisted). Narrow to the one
+    # file /etc/resolv.conf symlinks to — whitelisting all of /mnt/wsl also
+    # exposes Docker Desktop sockets (reachable via curl --unix-socket):
+    # "/mnt/wsl/resolv.conf",
+]
+# writable = [                    # Extra writable paths (home is hidden/ro)
+#     # Prefer `whitelist` (ro) for anything you only need to read. Examples
+#     # of legitimate rw needs:
+#
+#     # Shell history — writable so new commands persist to the host.
+#     # Caveat: history files accumulate pasted secrets; omit for higher-risk
+#     # workloads.
+#     # "~/.local/share/fish/fish_history",
+#     # "~/.bash_history",
+#     # "~/.zsh_history",
+#
+#     # Project Python tooling (pyenv shims are read-execute, not read-write;
+#     # use whitelist unless something actually needs to write here):
+#     # "~/.pyenv/shims",
+#
 #     # To enable docker inside the sandbox, uncomment the matching socket
 #     # below (this overrides the default docker-socket mask):
 #     # "/run/docker.sock",                   # system docker
@@ -41,8 +56,10 @@ blacklist = [                     # Paths to hide (overlaid with tmpfs)
 # unshare_net = false             # Isolate network namespace
 # unshare_pid = true              # Isolate PID namespace (default: true)
 # new_session = true              # TIOCSTI protection (auto on kernels < 6.2)
-# clean_env = false               # Clear env, pass through only PATH/HOME/USER/
-#                                 # SHELL/TERM/LANG. Add others via [env].
+clean_env = true                  # Clear env, pass through only PATH/HOME/USER/
+                                  # SHELL/TERM/LANG. Add others via [env].
+                                  # Without this, host ANTHROPIC_API_KEY /
+                                  # AWS_* / GH_TOKEN etc. leak into the sandbox.
 
 # [env]                             # environment variables (set before shell starts)
 # XDG_DATA_HOME = "vault/.config"  # ~ expanded for values starting with ~/
