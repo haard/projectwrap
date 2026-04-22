@@ -5,6 +5,7 @@ import shlex
 from pathlib import Path
 
 import pytest
+
 from project_wrap.core import (
     build_bwrap_args,
     build_shell_argv,

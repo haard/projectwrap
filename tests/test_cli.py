@@ -1,6 +1,7 @@
 """Tests for CLI module."""
 
 import pytest
+
 from project_wrap.cli import main
 
 
