@@ -332,8 +332,8 @@ When sandboxing is enabled:
 - XDG runtime directory isolated (D-Bus, Wayland, keyring sockets)
 - Sandbox dies with parent process
 - Encrypted volumes mount in isolated namespace (invisible on host)
-- Writable paths are auto-created (as directories) if they don't exist;
-  paths that already exist are bound as-is, so a file entry binds that file
+- Writable and blacklist paths must exist on the host; missing entries
+  abort with a single aggregated error listing every missing path
 
 Run your editor from inside the sandbox if it has any capacity to run
 linters, hooks, or anything else from the project environment. A
