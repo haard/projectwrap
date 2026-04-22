@@ -3,10 +3,50 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from . import core
 from .validate import validate_project_name
+
+_SCANNED_LIST_KEYS = {"blacklist", "whitelist", "writable"}
+_LIST_START_RE = re.compile(r"^\s*(\w+)\s*=\s*\[")
+_STRING_ENTRY_RE = re.compile(r'^\s*"([^"]*)"')
+
+
+def _comment_missing_paths(toml_text: str) -> str:
+    """Comment out blacklist/whitelist/writable entries whose paths don't exist.
+
+    Line-based so template comments and formatting survive. Only uncommented
+    string entries are considered; already-commented lines are left as-is.
+    """
+    out: list[str] = []
+    in_scanned_list = False
+    for line in toml_text.splitlines():
+        stripped = line.lstrip()
+        if not in_scanned_list:
+            m = _LIST_START_RE.match(line)
+            if m and m.group(1) in _SCANNED_LIST_KEYS:
+                in_scanned_list = True
+            out.append(line)
+            continue
+        if stripped.startswith("]"):
+            in_scanned_list = False
+            out.append(line)
+            continue
+        if not stripped or stripped.startswith("#"):
+            out.append(line)
+            continue
+        entry = _STRING_ENTRY_RE.match(line)
+        if entry and not core.expand_path(entry.group(1)).exists():
+            indent = line[: len(line) - len(stripped)]
+            out.append(f"{indent}# {stripped}  # path not found on host")
+            continue
+        out.append(line)
+    result = "\n".join(out)
+    if toml_text.endswith("\n"):
+        result += "\n"
+    return result
 
 
 def _load_package_template(name: str) -> str:
@@ -89,6 +129,7 @@ def create_project(
     toml = _load_template("project.toml").format(
         name=name, dir=resolved_dir, sandbox_enabled=sandbox_enabled, shell=shell
     )
+    toml = _comment_missing_paths(toml)
 
     config_dir.mkdir(parents=True)
     config_dir.chmod(0o700)
