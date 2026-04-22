@@ -5,7 +5,6 @@ import tomllib
 from pathlib import Path
 
 import pytest
-
 from project_wrap.scaffold import create_project, ensure_templates
 from project_wrap.validate import check_config_permissions, validate_config
 

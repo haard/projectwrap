@@ -11,8 +11,8 @@ from .core import (
     list_projects,
     run_project,
 )
-from .scaffold import create_project, ensure_templates
 from .deps import check_optional_deps
+from .scaffold import create_project, ensure_templates
 
 
 def main(argv: list[str] | None = None) -> int:

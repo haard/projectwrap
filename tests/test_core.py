@@ -2,7 +2,6 @@
 
 import os
 import shlex
-import tomllib
 from pathlib import Path
 
 import pytest
