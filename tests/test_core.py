@@ -198,6 +198,26 @@ class TestBuildBwrapArgs:
             assert result[idx - 2] == "--ro-bind"
         assert os.path.realpath(str(other)) not in result
 
+    def test_docker_socket_skipped_when_under_blacklist(self, tmp_path, monkeypatch):
+        # Regression: bwrap can't ro-bind /dev/null over a destination whose
+        # parent doesn't propagate (WSL dynamic mounts under /mnt/wsl/...).
+        # If the user already blacklists the parent, the mask is redundant
+        # AND breaks bwrap because the destination doesn't exist in the
+        # staging filesystem.
+        mnt = tmp_path / "mnt"
+        sock_dir = mnt / "wsl" / "docker-desktop-bind-mounts" / "Ubuntu"
+        sock_dir.mkdir(parents=True)
+        sock = sock_dir / "docker.sock"
+        sock.touch()
+
+        monkeypatch.setattr(
+            "project_wrap.core._DOCKER_SOCKET_CANDIDATES",
+            [str(sock)],
+        )
+        result = build_bwrap_args({"blacklist": [str(mnt)]}, tmp_path)
+
+        assert os.path.realpath(str(sock)) not in result
+
     def test_docker_socket_dedup_via_symlink(self, tmp_path, monkeypatch):
         real_dir = tmp_path / "run"
         real_dir.mkdir()

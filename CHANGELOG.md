@@ -18,6 +18,14 @@
   whitelisting `/mnt/wsl` (e.g. to get resolv.conf) had a clean path to the
   host Docker engine — reachable via `curl --unix-socket …` — which is a
   full root escape. Candidate list now accepts glob patterns — `core.py`
+- Docker socket mask skips candidates whose path is already under a
+  blacklisted directory. Fixes a regression where projects with `/mnt` in
+  their blacklist failed to launch with `bwrap: Can't bind mount
+  /oldroot/dev/null on /newroot/mnt/wsl/.../docker.sock: No such file or
+  directory` — WSL's dynamic submounts under `/mnt/wsl/docker-desktop-*`
+  don't propagate through `--ro-bind / /`, so the mask's destination
+  didn't exist when bwrap processed it. Skipping is safe: a blacklisted
+  parent already hides the socket — `core.py`
 
 ## 202604.4
 

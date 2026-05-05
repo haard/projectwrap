@@ -132,28 +132,6 @@ def build_bwrap_args(
     uid = os.getuid()
     args.extend(["--tmpfs", f"/run/user/{uid}"])
 
-    # Mask docker sockets — connect() works on ro-bound sockets, so any
-    # accessible socket is a sandbox escape to root if docker is running.
-    # Candidates may include wildcards (WSL Docker Desktop paths vary by
-    # distro name). Resolve to canonical paths and dedupe: /var/run is a
-    # symlink to /run on modern Linux, and bwrap can't bind through a
-    # symlink destination. Override via `writable`.
-    seen_socks: set[str] = set()
-    for sock in _DOCKER_SOCKET_CANDIDATES:
-        pattern = str(expand_path(sock))
-        for match in glob.glob(pattern):
-            sock_real = os.path.realpath(match)
-            if sock_real in seen_socks:
-                continue
-            seen_socks.add(sock_real)
-            args.extend(["--ro-bind", "/dev/null", sock_real])
-
-    # Always blacklist the config directory (prevents reading other project configs
-    # or modifying sandbox rules from inside the sandbox)
-    config_dir_resolved = get_config_dir().resolve()
-    if config_dir_resolved.exists():
-        args.extend(["--tmpfs", str(config_dir_resolved)])
-
     # Validate blacklist and writable up front so the user sees every missing
     # path in one error, rather than one-per-run. Whitelist is "exception to
     # blacklist" and silently skips missing entries by design.
@@ -179,11 +157,48 @@ def build_bwrap_args(
             f"Fix your config (comment out the missing entries or adjust the paths)."
         )
 
-    # Blacklist paths by overlaying with tmpfs (dirs) or /dev/null (files)
+    # Resolve blacklist now so the docker-socket loop can skip sockets that
+    # the user's blacklist will already hide. Two reasons:
+    #   1. Avoids redundant binds.
+    #   2. Avoids bwrap failing to ro-bind /dev/null over a destination whose
+    #      parent doesn't propagate into the sandbox (e.g. WSL's dynamic
+    #      mounts under /mnt/wsl/docker-desktop-bind-mounts/<distro>/ do not
+    #      come along on `--ro-bind / /`).
+    blacklist_resolved = [p.resolve() for p in blacklist_expanded]
+
+    # Mask docker sockets — connect() works on ro-bound sockets, so any
+    # accessible socket is a sandbox escape to root if docker is running.
+    # Candidates may include wildcards (WSL Docker Desktop paths vary by
+    # distro name). Resolve to canonical paths and dedupe: /var/run is a
+    # symlink to /run on modern Linux, and bwrap can't bind through a
+    # symlink destination. Override via `writable`.
+    seen_socks: set[str] = set()
+    for sock in _DOCKER_SOCKET_CANDIDATES:
+        pattern = str(expand_path(sock))
+        for match in glob.glob(pattern):
+            sock_real = os.path.realpath(match)
+            if sock_real in seen_socks:
+                continue
+            sock_real_path = Path(sock_real)
+            if any(
+                sock_real_path == bl or bl in sock_real_path.parents
+                for bl in blacklist_resolved
+            ):
+                continue
+            seen_socks.add(sock_real)
+            args.extend(["--ro-bind", "/dev/null", sock_real])
+
+    # Always blacklist the config directory (prevents reading other project configs
+    # or modifying sandbox rules from inside the sandbox)
+    config_dir_resolved = get_config_dir().resolve()
+    if config_dir_resolved.exists():
+        args.extend(["--tmpfs", str(config_dir_resolved)])
+
+    # Blacklist paths by overlaying with tmpfs (dirs) or /dev/null (files).
+    # bwrap can't mount tmpfs over symlinks — uses the canonical resolved
+    # paths computed above.
     blacklist_paths: list[Path] = [config_dir_resolved]
-    for p in blacklist_expanded:
-        # bwrap can't mount tmpfs over symlinks — resolve to the real path
-        mount_path = p.resolve()
+    for mount_path in blacklist_resolved:
         if mount_path.is_file():
             args.extend(["--ro-bind", "/dev/null", str(mount_path)])
         else:
