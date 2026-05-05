@@ -1,6 +1,6 @@
 # Changelog
 
-## 202604.4.1a0
+## 202605.1.0a0
 
 - **Breaking:** `whitelist` entries are now bound read-only (`--ro-bind`)
   instead of read-write (`--bind`). This reduces blast radius of whitelisting
@@ -26,6 +26,20 @@
   don't propagate through `--ro-bind / /`, so the mask's destination
   didn't exist when bwrap processed it. Skipping is safe: a blacklisted
   parent already hides the socket — `core.py`
+- Default `pwrap --new` template now uses deny-by-default home
+  (`blacklist = ["~", "/mnt"]`) with a narrow `whitelist` for shell config
+  and `~/.gitconfig`. Previously the template enumerated credential dirs
+  (`.ssh`, `.aws`, `.gnupg`, ...) which rotted as new tools added new
+  credential files (`.claude.json`, `.boto`, `.config/op`,
+  `.config/pypoetry`, `.config/uv` were all readable on a vanilla install).
+  Template-only; existing configs unaffected — `templates/project.toml`
+- Default template now sets `clean_env = true`. Without it, host env leaks
+  into the sandbox (a probe caught `ANTHROPIC_API_KEY` and `CODESTRAL_API_KEY`
+  passing through). Template-only — `templates/project.toml`
+- README gains a "WSL users" subsection in Security Defaults explaining that
+  `/etc/resolv.conf` symlinks into `/mnt/wsl` and recommending a narrow
+  `whitelist = ["/mnt/wsl/resolv.conf"]` instead of the whole tree (which
+  contains the Docker Desktop engine socket)
 
 ## 202604.4
 

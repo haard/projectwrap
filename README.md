@@ -88,15 +88,14 @@ shell = "/usr/bin/fish"
 [sandbox]
 enabled = true
 blacklist = [  # can't be accessed at all from the sandbox
-    "~/.kube",
-    "~/.aws",
-    "~/.ssh",
-    "~/projects/",  # hide all other projects
-    # trimmed for brevity — see the generated template (`pwrap --new`) for
-    # the full default blacklist (GCP, Azure, GPG, docker, npm, PyPI, /mnt).
+    "~",                      # deny-by-default home (default template)
+    "/mnt",                   # WSL Windows drives (default template)
+    "~/projects/",            # hide all other projects
 ]
-whitelist = [  # exceptions to the blacklist
-    "~/.kube/myproject",
+whitelist = [  # read-only exceptions to the blacklist
+    "~/.config/fish",         # shell config
+    "~/.gitconfig",
+    "~/.kube/myproject",      # per-project kubeconfig
     "~/.ssh/myproject_ed25519",
     "~/.ssh/known_hosts",
 ]
@@ -319,14 +318,20 @@ pwrap --version                            # show version
 
 When sandboxing is enabled:
 
-- Home is **read-only**; only the project directory is writable
+- Home is **bound read-only**; only the project directory is writable
 - Config directory (`~/.config/pwrap`) is always blacklisted
 - Docker sockets masked at `/run/docker.sock`, `/var/run/docker.sock`,
-  `~/.docker/desktop/docker-cli.sock`, `~/.docker/run/docker.sock` —
+  `~/.docker/desktop/docker-cli.sock`, `~/.docker/run/docker.sock`, and the
+  WSL Docker Desktop paths under `/mnt/wsl/docker-desktop*` —
   `connect()` works on ro-bound sockets, so an exposed docker socket is a
   full escape to root. Override via `writable` to enable docker access.
-- Default template blacklists credential dirs (SSH, GPG, AWS, GCP, Azure,
-  Docker, npm, PyPI) and `/mnt` (WSL Windows drives)
+- Default template uses **deny-by-default home**: `blacklist = ["~", "/mnt"]`
+  hides every dotfile and WSL Windows drives, and `whitelist` binds shell
+  config and `~/.gitconfig` back read-only. Add paths to `whitelist` (ro)
+  or `writable` (rw) for what your project needs
+- Default template sets `clean_env = true` — host env is cleared except for
+  `PATH/HOME/USER/SHELL/TERM/LANG`; pass others through with `[env]` to
+  prevent accidental leakage of `ANTHROPIC_API_KEY`, `AWS_*`, `GH_TOKEN`, etc.
 - PID and IPC namespaces are isolated
 - TIOCSTI injection blocked automatically on kernels < 6.2
 - XDG runtime directory isolated (D-Bus, Wayland, keyring sockets)
@@ -334,6 +339,24 @@ When sandboxing is enabled:
 - Encrypted volumes mount in isolated namespace (invisible on host)
 - Writable and blacklist paths must exist on the host; missing entries
   abort with a single aggregated error listing every missing path
+
+##### WSL users #####
+
+`/etc/resolv.conf` on WSL is a symlink into `/mnt/wsl`, so blacklisting
+`/mnt` breaks DNS inside the sandbox. Fix it with a **narrow** whitelist:
+
+```toml
+whitelist = [
+    "/mnt/wsl/resolv.conf",
+]
+```
+
+**Do not** whitelist the whole `/mnt/wsl` tree — it contains the Docker
+Desktop engine socket at `/mnt/wsl/docker-desktop-bind-mounts/<distro>/docker.sock`
+and various `shared-sockets/*.sock`, all reachable with `curl --unix-socket`
+once they're visible inside the sandbox. A reachable docker socket is a full
+root escape. The socket mask covers these paths by default, but only if
+you don't re-expose them writable via `/mnt/wsl`.
 
 Run your editor from inside the sandbox if it has any capacity to run
 linters, hooks, or anything else from the project environment. A
