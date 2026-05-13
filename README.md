@@ -166,6 +166,64 @@ This gives each project its own Claude state (settings, history, MCP logs) —
 no leakage between sandboxed projects. With an `[encrypted]` volume, Claude's
 state is encrypted at rest.
 
+##### AI agent with isolated home #####
+
+AI agents write to many paths under `~/` that change between versions. Instead of whitelisting each
+path individually, set `HOME` to a fake home directory inside the project:
+
+```toml
+[project]
+name = "agent-project"
+dir = "~/projects/agent-project"
+shell = "/usr/bin/fish"
+
+[sandbox]
+enabled = true
+writable = [
+    "/tmp/.X11-unix",             # X11 socket (if needed)
+    "/tmp/tmux-1000",             # tmux socket (for Claude Code)
+]
+
+[env]
+HOME = "~/projects/agent-project/.home"
+```
+
+The fake home must exist and be inside a writable path (the project dir is always writable). Create
+it before first run:
+
+```bash
+mkdir -p ~/projects/agent-project/.home
+```
+
+Then install agent tooling inside the sandbox so it sets up in the fake home:
+
+```bash
+pwrap agent-project
+curl -fsSL https://claude.ai/install.sh | sh   # installs to ~/.local/bin inside fake home
+```
+
+To migrate existing agent config (conversation history, settings):
+
+```bash
+cp -r ~/.claude ~/projects/agent-project/.home/.claude
+```
+
+For encrypted agent state, place the fake home inside a vault:
+
+```toml
+[sandbox]
+enabled = true
+
+[encrypted]
+cipherdir = "encrypted"
+mountpoint = "~/projects/agent-project/vault"
+
+[env]
+HOME = "~/projects/agent-project/vault/.home"
+```
+
+Now all agent data is encrypted at rest and automatically locked when the sandbox exits.
+
 ##### Encrypted vault, minimal sandbox rules #####
 
 Minimal sandbox configuration — no custom blacklists or whitelists, no

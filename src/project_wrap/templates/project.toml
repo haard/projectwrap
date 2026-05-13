@@ -62,6 +62,7 @@ clean_env = true                  # Clear env, pass through only PATH/HOME/USER/
                                   # AWS_* / GH_TOKEN etc. leak into the sandbox.
 
 # [env]                             # environment variables (set before shell starts)
+# HOME = "~/projects/myproject/.home"  # Isolated home for AI agents (must exist)
 # XDG_DATA_HOME = "vault/.config"  # ~ expanded for values starting with ~/
 # AICHAT_CONFIG_DIR = "~/.local/share/aichat"
 

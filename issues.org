@@ -1,0 +1,30 @@
+#+TITLE: pwrap issues
+#+TODO: TODO DONE
+
+* TODO [#B] Split core.py into focused modules
+~core.py~ still mixes config load, bwrap argv construction, shell argv, and project listing after
+the scaffold extraction. =bwrap.py= is the next natural seam — isolates the
+security-relevant argv construction so it's easier to audit.
+
+* TODO [#B] Clarify that /mnt + credential-dir blacklisting is template-only
+README "Security Defaults" lists =/mnt= and credential-dir blacklisting in a way that reads as
+"always enforced". Only the template applies them; the sandbox code does not. Users who edit the
+template away or start from scratch can believe they're protected when they aren't.
+
+* TODO [#C] Clarify README on docker socket masking mechanism
+README "Security Defaults" says "Docker socket ... masked — =connect()= works on ro-bound
+sockets". Code binds =/dev/null= (char device) so =connect()= returns ENOTSOCK. Add a sentence
+explaining why =/dev/null= is used instead of re-binding the socket in place.
+
+* TODO [#C] Drop or justify redundant =--ro-bind $HOME $HOME=
+~core.py:109-111~ binds =$HOME= read-only on top of the =--ro-bind / /= that already covers it.
+Either remove, or add a comment explaining why the explicit bind is needed (e.g. interaction with
+later =--bind= of the project dir).
+
+* TODO [#C] Remove dead =import sys= inside build_bwrap_args
+~core.py~ re-imports ~sys~ inside ~build_bwrap_args~ even though it's already imported at module
+top.
+
+* TODO [#C] Tighten run_vault docstring
+~vault.py:run_vault~ claims "does not return on success for the primary path" but
+~_attach_to_primary~ returns an int normally. Reword to describe both paths accurately.

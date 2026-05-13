@@ -459,6 +459,7 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
         sandbox_cfg, project_dir,
         init_script=init_script, rw_bind_extra=rw_bind_extra,
     )
+    bwrap_args.extend(["--setenv", "PWRAP_PROJECT", name])
     if vault_config:
         bwrap_args.extend(["--setenv", "PWRAP_VAULT_DIR", str(vault_config.mountpoint)])
     for k, v in resolved_env.items():
