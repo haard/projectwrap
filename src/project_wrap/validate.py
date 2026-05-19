@@ -97,6 +97,7 @@ _SCHEMA: dict[str, dict[str, type] | None] = {
         "enabled": bool,
         "blacklist": list,
         "whitelist": list,
+        "devices": bool,
         "unshare_net": bool,
         "unshare_pid": bool,
         "new_session": bool,

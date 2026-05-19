@@ -108,14 +108,39 @@ def build_bwrap_args(
     Returns:
         List of bwrap arguments
     """
+    # When device passthrough is needed, use --dev-bind for full /dev to get
+    # proper device access. Otherwise use minimal --dev for better isolation.
+    devices_enabled = sandbox.get("devices", False)
+
     args = [
         "bwrap",
         # Base filesystem (read-only root, read-only home, writable project dir)
         "--ro-bind",
         "/",
         "/",
-        "--dev",
-        "/dev",
+    ]
+    if devices_enabled:
+        args.extend(["--dev-bind", "/dev", "/dev"])
+        # Mask dangerous devices that come along with full /dev bind.
+        # Directories: hide with tmpfs
+        for dev_dir in ["/dev/input"]:
+            if Path(dev_dir).is_dir():
+                args.extend(["--tmpfs", dev_dir])
+        # Block/char devices: hide with /dev/null
+        # - Disk devices (raw block access bypasses fs permissions)
+        # - /dev/kvm (VM escape vector)
+        # - /dev/mem, /dev/kmem (kernel memory)
+        masked_patterns = [
+            "/dev/sd[a-z]*", "/dev/nvme*", "/dev/vd[a-z]*", "/dev/xvd[a-z]*",
+            "/dev/kvm", "/dev/mem", "/dev/kmem",
+        ]
+        for pattern in masked_patterns:
+            for match in glob.glob(pattern):
+                if Path(match).exists():
+                    args.extend(["--ro-bind", "/dev/null", match])
+    else:
+        args.extend(["--dev", "/dev"])
+    args.extend([
         "--proc",
         "/proc",
         "--tmpfs",
@@ -126,7 +151,7 @@ def build_bwrap_args(
         # Hardening
         "--die-with-parent",
         "--unshare-ipc",
-    ]
+    ])
 
     # Isolate XDG runtime dir (D-Bus, Wayland, SSH/GPG agent sockets)
     uid = os.getuid()

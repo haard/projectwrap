@@ -1,7 +1,12 @@
 # Changelog
 
-## 202605.1.0a0
+## 202604.6.0
 
+- Add `devices = true` sandbox option to enable host device passthrough (FIDO2/YubiKey,
+  USB, etc.). Uses `--dev-bind /dev /dev` instead of minimal devtmpfs. Dangerous devices
+  are auto-masked: `/dev/input/*` (keylogging), `/dev/sd*`/`/dev/nvme*` (raw disk),
+  `/dev/kvm`, `/dev/mem`, `/dev/kmem`. Additional devices can be masked via `blacklist`.
+  — `core.py`, `validate.py`
 - **Breaking:** `whitelist` entries are now bound read-only (`--ro-bind`)
   instead of read-write (`--bind`). This reduces blast radius of whitelisting
   broad trees (e.g. `/mnt/wsl` for WSL DNS) where the bound path contains

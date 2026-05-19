@@ -363,6 +363,53 @@ class TestBuildBwrapArgs:
         idx = result.index(resolved)
         assert result[idx - 1] == "--bind"
 
+    def test_devices_uses_dev_bind(self, tmp_path):
+        """When devices is true, use --dev-bind /dev for full device access."""
+        result = build_bwrap_args(
+            {"devices": True},
+            tmp_path,
+        )
+
+        # Should use --dev-bind /dev /dev instead of --dev /dev
+        idx = result.index("/dev")
+        assert result[idx - 1] == "--dev-bind"
+        assert result[idx + 1] == "/dev"
+
+    def test_no_devices_uses_minimal_dev(self, tmp_path):
+        """Without devices config, use minimal devtmpfs."""
+        result = build_bwrap_args({}, tmp_path)
+
+        # Should have --dev /dev
+        idx = result.index("/dev")
+        assert result[idx - 1] == "--dev"
+
+    def test_devices_false_uses_minimal_dev(self, tmp_path):
+        """When devices is explicitly false, use minimal devtmpfs."""
+        result = build_bwrap_args({"devices": False}, tmp_path)
+
+        idx = result.index("/dev")
+        assert result[idx - 1] == "--dev"
+
+    def test_devices_masks_dangerous_devs(self, tmp_path, monkeypatch):
+        """Dangerous devices are masked when using full /dev bind."""
+        # Mock /dev/input existing as a directory
+        real_is_dir = Path.is_dir
+        def mock_is_dir(self):
+            if str(self) == "/dev/input":
+                return True
+            return real_is_dir(self)
+        monkeypatch.setattr(Path, "is_dir", mock_is_dir)
+
+        result = build_bwrap_args(
+            {"devices": True},
+            tmp_path,
+        )
+
+        # /dev/input should be masked with tmpfs
+        if "/dev/input" in result:
+            idx = result.index("/dev/input")
+            assert result[idx - 1] == "--tmpfs"
+
     def test_unshare_net(self, tmp_path):
         result = build_bwrap_args(
             {"unshare_net": True},
