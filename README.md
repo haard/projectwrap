@@ -354,11 +354,13 @@ changes. pwrap warns and prompts for confirmation when a concurrent session
 is detected.
 
 **Shared mode** (`shared = true`): the first terminal becomes the
-**primary** session. It mounts gocryptfs, prints a vault token, and stays
-in the foreground (no background daemon). Additional terminals prompt for
-the token and attach as children. `$PWRAP_VAULT_TOKEN` is available inside
-the sandbox. When the primary exits, all attached terminals are terminated
-and the mount is released.
+**primary** session. It mounts gocryptfs and stays in the foreground (no
+background daemon). Additional terminals prompt for the gocryptfs password
+again and attach as children. The primary keeps only a per-session scrypt
+verifier of the password in memory — it is never printed, stored, or exposed
+inside the sandbox, so it cannot leak out and be re-used from the outside.
+When the primary exits, all attached terminals are terminated and the mount
+is released.
 
 #### Usage ####
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## 202610.0.0
+
+- **Breaking:** shared vault sessions (`shared = true`) no longer use a vault
+  token. The primary no longer prints a token and no longer injects
+  `$PWRAP_VAULT_TOKEN` into the sandbox; additional terminals must re-enter
+  the gocryptfs password to attach. The password is read by the primary
+  itself, piped to gocryptfs over stdin, and then replaced in memory by a
+  per-session scrypt verifier (salt + digest, constant-time compare) — so
+  the secret never reaches the terminal scrollback or the sandbox
+  environment, and a dump of the primary yields only a salted hash. A
+  failed attach is rate-limited as before (1s delay before the error) —
+  `vault.py`, `README.md`
+
 ## 202604.6.0
 
 - Add `devices = true` sandbox option to enable host device passthrough (FIDO2/YubiKey,

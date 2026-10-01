@@ -6,7 +6,10 @@ Two modes, both driven by `run_vault`:
   project lockfile detects concurrent sessions and prompts before joining.
 - shared=True: the first terminal acquires the flock and re-execs into `serve`,
   which mounts gocryptfs, forks the primary bwrap via `_pty_proxy`, and listens
-  on a unix socket for additional terminals to attach. When the primary exits,
+  on a unix socket for additional terminals to attach. Attaching requires the
+  gocryptfs password again: serve keeps only a per-session scrypt verifier
+  (never the plaintext, never anything exposed to the sandbox), so the secret
+  cannot leak out and be re-used from the outside. When the primary exits,
   all attached clients are torn down and the mount is released. No background
   daemon — the serve process stays in the foreground of the terminal that
   launched it.
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 import fcntl
 import getpass
+import hashlib
 import hmac
 import json
 import os
@@ -317,9 +321,9 @@ def _attach_to_primary(config: VaultConfig, bwrap_argv: list[str]) -> int:
         )
         return 1
 
-    token = getpass.getpass("Vault token: ")
+    password = getpass.getpass("Vault password: ")
     data = json.dumps({
-        "token": token,
+        "password": password,
         "argv": bwrap_argv,
     }).encode()
     _send_fds(client, [0, 1, 2], data)
@@ -349,12 +353,37 @@ def _attach_to_primary(config: VaultConfig, bwrap_argv: list[str]) -> int:
 
 # --- serve (primary, runs inside unshare namespace) ---
 
+_SCRYPT_N = 16384
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_KEYLEN = 32
 
-def _inject_token(bwrap_argv: list[str], token: str) -> list[str]:
-    """Inject PWRAP_VAULT_TOKEN via bwrap --setenv."""
-    argv = list(bwrap_argv)
-    argv[1:1] = ["--setenv", "PWRAP_VAULT_TOKEN", token]
-    return argv
+
+def _password_verifier(password: str) -> tuple[bytes, bytes]:
+    """Derive a per-session scrypt verifier (salt, digest) for the password.
+
+    serve keeps only this verifier after the mount succeeds — never the
+    plaintext password — so a memory disclosure of the primary cannot leak a
+    reusable secret. The random salt makes the digest useless off-session.
+    """
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(
+        password.encode(), salt=salt,
+        n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=_SCRYPT_KEYLEN,
+    )
+    return salt, digest
+
+
+def _check_password(supplied: str, salt: bytes, digest: bytes) -> bool:
+    """Constant-time check of an attach password against the verifier."""
+    try:
+        candidate = hashlib.scrypt(
+            supplied.encode(), salt=salt,
+            n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=_SCRYPT_KEYLEN,
+        )
+    except (ValueError, UnicodeEncodeError):
+        return False
+    return hmac.compare_digest(candidate, digest)
 
 
 def serve(
@@ -370,15 +399,22 @@ def serve(
     the foreground of the launching terminal. Exits with the primary bwrap's
     exit status after tearing down any attached clients and unmounting.
     """
-    # Mount gocryptfs (password prompt goes to the primary's tty)
+    # Read the password here (not via gocryptfs's own prompt) so it can be
+    # verified against later attaches. It is piped to gocryptfs over stdin
+    # (`-passfile /dev/stdin`) — never on the command line, in the
+    # environment, or on disk — and dropped from memory right after the
+    # mount: only the scrypt verifier (salt, digest) is retained.
+    password = getpass.getpass("Vault password: ")
     result = subprocess.run(
-        ["gocryptfs", str(config.cipherdir), str(config.mountpoint)]
+        ["gocryptfs", "-passfile", "/dev/stdin",
+         str(config.cipherdir), str(config.mountpoint)],
+        input=password,
+        text=True,
     )
     if result.returncode != 0:
         raise SystemExit(f"Failed to mount encrypted volume: {config.cipherdir}")
-
-    token = secrets.token_hex(16)
-    print(f"Vault token: {token}", flush=True)
+    verifier_salt, verifier_digest = _password_verifier(password)
+    del password
 
     sock_path.unlink(missing_ok=True)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -397,7 +433,7 @@ def serve(
     signal.signal(signal.SIGHUP, handle_signal)
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
 
-    primary_argv = _inject_uid(_inject_token(bwrap_argv, token), real_uid, real_gid)
+    primary_argv = _inject_uid(bwrap_argv, real_uid, real_gid)
 
     primary_pid = os.fork()
     if primary_pid == 0:
@@ -476,10 +512,15 @@ def serve(
                         pass
                 continue
 
-            if not hmac.compare_digest(msg.get("token", ""), token):
+            supplied = msg.get("password", "")
+            if not isinstance(supplied, str) or not _check_password(
+                supplied, verifier_salt, verifier_digest
+            ):
                 time.sleep(1)
                 try:
-                    client.sendall(json.dumps({"error": "invalid token"}).encode())
+                    client.sendall(
+                        json.dumps({"error": "invalid password"}).encode()
+                    )
                 except OSError:
                     pass
                 client.close()
@@ -490,9 +531,7 @@ def serve(
                         pass
                 continue
 
-            child_argv = _inject_uid(
-                _inject_token(msg["argv"], token), real_uid, real_gid
-            )
+            child_argv = _inject_uid(msg["argv"], real_uid, real_gid)
 
             proxy_pid = os.fork()
             if proxy_pid == 0:

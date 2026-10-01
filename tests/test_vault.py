@@ -1,4 +1,4 @@
-"""Unit tests for vault concurrency handling."""
+"""Unit tests for vault concurrency handling and attach-password verification."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import time
 import pytest
 
 from project_wrap import vault
+from project_wrap.vault import _check_password, _password_verifier
 
 
 @pytest.fixture
@@ -123,3 +124,41 @@ def test_check_concurrent_abort_returns_none(runtime_dir, monkeypatch):
         if holder.is_alive():
             holder.terminate()
             holder.join()
+
+
+class TestPasswordVerifier:
+    """Tests for the per-session scrypt verifier used by shared vaults."""
+
+    def test_correct_password_accepted(self):
+        salt, digest = _password_verifier("hunter2")
+        assert _check_password("hunter2", salt, digest)
+
+    def test_wrong_password_rejected(self):
+        salt, digest = _password_verifier("hunter2")
+        assert not _check_password("hunter3", salt, digest)
+
+    def test_empty_password_round_trips(self):
+        salt, digest = _password_verifier("")
+        assert _check_password("", salt, digest)
+        assert not _check_password("x", salt, digest)
+
+    def test_verifier_is_salted_per_session(self):
+        salt_a, digest_a = _password_verifier("same-password")
+        salt_b, digest_b = _password_verifier("same-password")
+        assert salt_a != salt_b
+        assert digest_a != digest_b
+
+    def test_unicode_password_round_trips(self):
+        salt, digest = _password_verifier("pässwörd- секрет")
+        assert _check_password("pässwörd- секрет", salt, digest)
+
+    def test_lone_surrogate_rejected_not_raised(self):
+        # A lone surrogate cannot be encoded to UTF-8; the check must reject
+        # it instead of raising into the serve accept loop.
+        salt, digest = _password_verifier("hunter2")
+        assert not _check_password("\ud800", salt, digest)
+
+    def test_plaintext_not_derivable_from_verifier(self):
+        # The verifier must not contain the password itself.
+        salt, digest = _password_verifier("hunter2")
+        assert b"hunter2" not in salt + digest
