@@ -6,10 +6,17 @@
 the scaffold extraction. =bwrap.py= is the next natural seam — isolates the
 security-relevant argv construction so it's easier to audit.
 
-* TODO [#B] Clarify that /mnt + credential-dir blacklisting is template-only
+* TODO [#B] Clarify that blacklisting is template-only and home is readable by default (audit F4)
 README "Security Defaults" lists =/mnt= and credential-dir blacklisting in a way that reads as
 "always enforced". Only the template applies them; the sandbox code does not. Users who edit the
-template away or start from scratch can believe they're protected when they aren't.
+template away or start from scratch can believe they're protected when they aren't. Verified live
+in the 2026-10-10 audit: with a minimal config (=enabled = true= only) the sandbox reads
+=~/.aws_credentials= and =~/.ssh/id_ed25519= — "Home is bound read-only" means readable, and the
+"Does" list's "Hides sensitive paths (credentials, configs, SSH keys)" is only true if the user
+keeps the template's =blacklist=. Given the stated goal ("one npm install away from pwned AWS
+credentials"), read access is the primary threat. Fix: documentation only — clarify in README
+"Security Defaults" that home is bound read-only (readable) by default and that hiding credentials
+is opt-in via =blacklist=.
 
 * TODO [#C] Clarify README on docker socket masking mechanism
 README "Security Defaults" says "Docker socket ... masked — =connect()= works on ro-bound
@@ -28,3 +35,125 @@ top.
 * TODO [#C] Tighten run_vault docstring
 ~vault.py:run_vault~ claims "does not return on success for the primary path" but
 ~_attach_to_primary~ returns an int normally. Reword to describe both paths accurately.
+
+* Security audit 2026-10-10
+Findings from a security review of pwrap grounded in the claims/goals in =README.md=. Method:
+full source read, test suite (227 passed), and live end-to-end verification with real =bwrap=
+0.9.0 + =gocryptfs= on WSL2 (kernel 6.6, Docker Desktop). Verdict: the README's claims mostly hold
+and the vault password lifecycle is solid (password never observed on a cmdline, in an environ, or
+on disk; wrong password aborts; shared-mode attach auth works; mount is host-invisible).
+Exceptions: the config-dir "always blacklisted" claim is false as stated (F2), the socket mask list
+is docker-only (F1), and single-mode vault leaks a gocryptfs daemon that poisons the next launch's
+concurrency warning (F3). Priorities: =[#A]= fix soon (security), =[#B]= fix when convenient,
+=[#C]= nice to have / conditional. F4 is merged into the "template-only blacklisting" item above.
+
+* TODO [#A] F1: Mask non-docker engine sockets (podman, containerd, crio, docker-cli.sock)
+~core.py:38~ (=_DOCKER_SOCKET_CANDIDATES~) lists only docker paths. Verified
+live: with sockets planted under =/run=, the sandbox sees
+=/run/podman/podman.sock= and =/run/containerd/containerd.sock= while
+=/run/docker.sock= is masked. Both are root escapes wherever they are
+group/world-accessible (rootful defaults are =root:root 0660=, which
+mitigates; rootless sockets under =/run/user/<uid>= are already hidden by the
+XDG tmpfs). =/run/docker-cli.sock= (Docker Desktop, =root:docker=) is also
+unmasked and reachable from the sandbox — it does not speak the engine API
+(all paths return "Not Found"), so lower severity, but mask it anyway.
+Fix: extend the candidate list (=/run/podman/podman.sock=,
+=/run/containerd/containerd.sock=, =/run/crio/crio.sock=,
+=/run/docker-cli.sock=, ...) or mask =*.sock= under =/run= except an
+allowlist.
+
+* TODO [#A] F2: Enforce the config-dir blacklist in validation
+README: "The config directory (~/.config/pwrap) is always blacklisted
+automatically — code inside the sandbox cannot read own or other project
+configs." Not enforced: the whitelist check (~core.py:225-247~) treats the
+config dir as an ordinary blacklisted parent, so
+=whitelist = ["~/.config/pwrap/other"]= passes and re-exposes another
+project's config read-only; =writable = ["~/.config/pwrap"]= (~core.py:249~)
+binds it read-write. Verified live: the sandbox read another project's config,
+and appended to its =project.toml= on the host. Impact: cross-project config
+tampering (disable the victim's sandbox, add =writable = ["/"]=, repoint its
+init script); the config dir also holds each project's gocryptfs cipherdir.
+Fix: reject =whitelist= / =writable= entries at or under the config dir
+during validation.
+
+* TODO [#A] Tests: pin the security invariants that are currently untested
+One task; add tests where missing and sane:
+- =whitelist= / =writable= at or under the config dir are rejected (F2).
+- Mask list covers podman/containerd/crio/docker-cli.sock (F1).
+- ~check_config_permissions~ rejects a world-writable grandparent and a
+  foreign-owned config file (F5).
+- Single-mode vault: lock released and no lingering gocryptfs daemon after
+  exit (F3) — integration-marked.
+- ~guide.generate_init_script~ quotes env values (F8).
+
+* TODO [#B] F3: Single-mode vault leaks a gocryptfs daemon; lock poisons next launch
+Verified live: after a single-mode session exits cleanly, the gocryptfs
+daemon forked inside the unshared mount namespace lingers indefinitely and
+holds the inheritable lock fd, so the next launch of the same project falsely
+warns "another session is active" and prompts for consent (the warning
+disappears only after killing the daemon; a fresh daemon appears after every
+session). The mount itself stays host-invisible, so the README claim
+technically holds, but the leak keeps the decrypted master key in memory and
+— more importantly — false-positive concurrency warnings train users to
+press Enter through the real warning (concurrent gocryptfs mounts of one
+cipherdir can corrupt it). Shared mode is unaffected (~serve~ runs
+=fusermount -u= in its =finally=).
+Fix: in ~_run_single~ (~vault.py:230~), tear the mount down on shell exit
+(e.g. run gocryptfs in the foreground as a child of the inner shell and
+=fusermount -u= via trap), or reuse the serve teardown path.
+
+* TODO [#B] F5: Harden config permission checks (config root + ownership)
+~validate.py:64~ (=check_config_permissions~) checks only the file and its
+immediate parent. Verified: a world-writable grandparent
+(=~/.config/pwrap= at 0777) is accepted — an attacker with write on the
+grandparent can swap the project dir and plant a config that passes every
+check; a foreign-owned 0644 config file is also accepted (no ownership
+check). Related: ~scaffold.py:72~ (=ensure_templates~) creates
+=~/.config/pwrap= with =mkdir(parents=True)= and no chmod (observed 0755,
+umask-dependent; 0777 under umask 0). Project dirs/files are chmod'd
+0700/0600, the root is not. Fix: chmod 0700 the config root on creation;
+check =st_uid == os.getuid()= and the config root's permissions too.
+
+* TODO [#B] F7: Bump shared-vault scrypt verifier to gocryptfs's KDF parameters
+~vault.py:356~ uses N=16384, r=8, p=1 vs gocryptfs's default N=65536. The
+verifier is per-session (created fresh in ~serve~ with a random salt, never
+persisted), so raising =_SCRYPT_N= is fully backwards compatible — no
+migration, affects only future sessions (better than "future new projects").
+Defense-in-depth: a memory dump of the primary currently yields an offline
+brute-force target 4x cheaper than the cipherdir's own KDF. Fix: set
+=_SCRYPT_N = 65536=.
+
+* TODO [#C] F6: [env] values on process command lines — fix only if simple
+Verified live: in shared-vault mode the serve process's cmdline contains
+=--bwrap-argv= with the full JSON argv including =--setenv= values
+(~vault.py:298~), and the pty-proxy child keeps the same cmdline (it never
+execs); in single-vault mode the values are embedded in the =sh -c= string
+(~vault.py:242~); in plain sandboxed mode they are on bwrap's own argv.
+Visible to same-uid processes via =/proc/<pid>/cmdline= for the whole
+session. The serve-cmdline part is avoidable (pass the argv over a pipe or
+inherited fd instead of argv); the bwrap =--setenv= part is inherent (bwrap
+has no env-file mechanism). Fix only the serve part, and only if it does not
+complicate the code; document the inherent exposure either way.
+
+* TODO [#C] F8: Quote env values in generated init scripts; validate shell at creation
+~guide.py:468,491~ interpolate env values unquoted into the generated init
+script (=set -gx {k} {v}= / =export {k}={v}=), which runs inside the sandbox.
+Verified: a value with spaces breaks the line; shell metacharacters execute.
+Values derive from the project path (user-controlled) and fixed keys, so
+mostly self-inflicted, but the generator should quote. Also ~run_guide~ does
+not run ~validate_shell~ on the shell answer at creation time (it is caught at
+launch — against the fail-fast principle).
+
+* TODO [#C] F9: Robustness cleanups from the audit
+- ~print("Loading ...")~ is lost when stdout is redirected (block-buffered;
+  =execvp= discards the buffer). Cosmetic.
+- Shared-vault primary with piped (non-tty) stdin: getpass's buffered read
+  swallows subsequent piped lines, so the primary shell gets immediate EOF.
+  Interactive use unaffected.
+- ~serve~ raises =KeyError= on an attach message missing ="argv"=, killing
+  the primary session (requires the correct password first — same-uid only).
+- SIGKILL of the shared-vault primary orphans attached terminals and the
+  mount (lock released; stale socket cleaned on next primary).
+- =[project] name= (display name) is unvalidated and passed to
+  =tmux rename-window= (argv list, no shell, but a leading =- would be parsed
+  as a flag).
