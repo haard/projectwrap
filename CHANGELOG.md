@@ -10,6 +10,25 @@
   Claude state), home paths to whitelist, and venv activation. Generates a
   customized `project.toml` and init script, and optionally initializes a
   gocryptfs encrypted volume — `guide.py`, `cli.py`, `README.md`
+- Guided mode enhancements:
+  - **WSL detection** (`is_wsl()`): probes for WSL2 via `/proc/sys/kernel/osrelease`
+    and `/mnt/wsl`. On WSL, asks about Windows drive access (`/mnt`) and
+    auto-whitelists `/mnt/wsl/resolv.conf` for DNS when network is not isolated
+    and `/mnt` stays blacklisted
+  - **Docker on WSL**: the Docker question is always asked on WSL, even when
+    the Docker Desktop socket is not currently visible (Docker Desktop may not
+    be running). Prints the expected socket path
+    (`/mnt/wsl/docker-desktop-bind-mounts/<distro>/docker.sock`) for manual
+    addition to `writable`
+  - **HOME inside vault**: option to set `HOME` to `vault/.home` so all
+    shell/tool state is encrypted at rest. Init script includes `mkdir -p`
+    for first-launch setup. When `clean_env` is off, checks for host XDG
+    vars (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`,
+    `XDG_STATE_HOME`) that would override HOME-relative defaults and
+    offers to enable `clean_env` to strip them
+  - **Configurable blacklist**: `blacklist_mnt` parameter controls whether
+    `/mnt` is included in the default blacklist
+  - Docker question text now warns: "exposes docker socket = root on host"
 
 ## 202610.0.0
 

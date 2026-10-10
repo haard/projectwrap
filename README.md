@@ -89,10 +89,15 @@ git, language) and asks targeted questions:
 
 - Project name and shell
 - Sandbox on/off
-- Docker access (auto-detects the socket on your host)
+- Docker access (auto-detects the socket on your host; on WSL2 the question
+  is always asked since Docker Desktop may not be running yet)
 - Network isolation
+- **WSL detection** — asks about Windows drive access (`/mnt`), and
+  auto-whitelists `/mnt/wsl/resolv.conf` for DNS when network is not isolated
 - Clean environment
 - Encrypted vault for secrets (`.env` files, shell history, Claude state)
+- **HOME inside the vault** — set `HOME` to `vault/.home` so all shell/tool
+  state is encrypted at rest
 - Home paths to whitelist (shell config, git, SSH, etc.)
 - Venv activation in the init script
 
@@ -102,7 +107,13 @@ pwrap --guide ~/projects/myproject
 #   Project name [myproject]:
 #   Shell [/usr/bin/fish]:
 #   Enable sandbox isolation? [Y/n]:
-#   Need access to Docker? [y/N]:
+#   Need access to Docker? (exposes docker socket = root on host) [y/N]:
+#   Isolate network? (no internet access in sandbox) [y/N]:
+#   → WSL detected.
+#   Need access to Windows drives (/mnt/c, /mnt/d, ...)? [y/N]:
+#   → Whitelisting /mnt/wsl/resolv.conf for DNS resolution.
+#   Clean environment? (only PATH/HOME/USER/SHELL/TERM/LANG pass through) [Y/n]:
+#   Use encrypted vault (gocryptfs) for secrets? [y/N]:
 #   ...
 # Created: ~/.config/pwrap/myproject/project.toml
 # Launch with: pwrap myproject

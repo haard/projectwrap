@@ -230,6 +230,76 @@ def find_docker_socket() -> str | None:
     return None
 
 
+def find_wsl_docker_socket_path() -> str | None:
+    """Construct the expected WSL Docker Desktop socket path.
+
+    On WSL2 with Docker Desktop integration, the socket lives at
+    /mnt/wsl/docker-desktop-bind-mounts/<distro>/docker.sock. It only exists
+    when Docker Desktop is running, so this returns the expected path even
+    if the socket is not currently present.
+
+    Returns None if the WSL distro name cannot be determined.
+    """
+    distro = os.environ.get("WSL_DISTRO_NAME")
+    if distro:
+        return f"/mnt/wsl/docker-desktop-bind-mounts/{distro}/docker.sock"
+    return None
+
+
+def wsl_needs_resolv_whitelist() -> bool:
+    """Check if WSL DNS requires whitelisting /mnt/wsl/resolv.conf.
+
+    On WSL, /etc/resolv.conf is a symlink into /mnt/wsl. If /mnt is
+    blacklisted, DNS breaks unless resolv.conf is whitelisted.
+    """
+    resolv = Path("/mnt/wsl/resolv.conf")
+    return resolv.exists() or Path("/etc/resolv.conf").is_symlink()
+
+
+_XDG_VARS = (
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+)
+
+
+def find_host_xdg_vars() -> list[str]:
+    """Return XDG environment variables that are set on the host.
+
+    These override HOME-relative defaults, so if HOME is inside the vault
+    and clean_env is off, host XDG vars would point tools at host paths
+    (which are blacklisted in the sandbox).
+    """
+    return [v for v in _XDG_VARS if os.environ.get(v)]
+
+
+_wsl_cache: bool | None = None
+
+
+def is_wsl() -> bool:
+    """Detect if running on WSL (Windows Subsystem for Linux)."""
+    global _wsl_cache
+    if _wsl_cache is not None:
+        return _wsl_cache
+
+    # Check /proc/sys/kernel/osrelease for Microsoft/WSL markers
+    osrelease = Path("/proc/sys/kernel/osrelease")
+    if osrelease.exists():
+        content = osrelease.read_text().lower()
+        if "microsoft" in content or "wsl" in content:
+            _wsl_cache = True
+            return True
+
+    # Fallback: /mnt/wsl exists and is a directory
+    if Path("/mnt/wsl").is_dir():
+        _wsl_cache = True
+        return True
+
+    _wsl_cache = False
+    return False
+
+
 def find_whitelist_candidates(shell: str) -> list[tuple[str, str]]:
     """Return common home paths that exist on this host, for whitelist selection.
 
@@ -303,6 +373,7 @@ def generate_config_toml(
     env_vars: dict[str, str] | None = None,
     vault_mountpoint: str | None = None,
     vault_shared: bool = False,
+    blacklist_mnt: bool = True,
 ) -> str:
     """Generate a project.toml string from guided-mode answers."""
     lines: list[str] = []
@@ -322,7 +393,8 @@ def generate_config_toml(
         lines.append("# Paths hidden from the sandbox (overlaid with tmpfs)")
         lines.append("blacklist = [")
         lines.append('    "~",       # Deny-by-default home')
-        lines.append('    "/mnt",    # WSL: Windows drives')
+        if blacklist_mnt:
+            lines.append('    "/mnt",    # WSL: Windows drives')
         lines.append("]")
         lines.append("")
         lines.append("# Read-only exceptions to the blacklist")
@@ -372,6 +444,7 @@ def generate_init_script(
     has_venv: bool = False,
     vault_mountpoint: str | None = None,
     env_vars: dict[str, str] | None = None,
+    home_in_vault: bool = False,
 ) -> str:
     """Generate an init script for the given shell."""
     shell_name = Path(shell).name
@@ -381,6 +454,10 @@ def generate_init_script(
     if is_fish:
         lines.append("# init.fish — runs inside the sandbox after project loads")
         lines.append("")
+        if home_in_vault:
+            lines.append("# HOME is inside the vault — create it on first launch")
+            lines.append("mkdir -p $PWRAP_VAULT_DIR/.home")
+            lines.append("")
         if has_venv:
             lines.append("# Virtual environment activation")
             lines.append("source .venv/bin/activate.fish")
@@ -394,12 +471,16 @@ def generate_init_script(
             lines.append("# Encrypted vault is available at $PWRAP_VAULT_DIR")
             lines.append("# Example: set -gx MY_APP_STATE $PWRAP_VAULT_DIR/state")
             lines.append("")
-        if not has_venv and not env_vars and not vault_mountpoint:
+        if not has_venv and not env_vars and not vault_mountpoint and not home_in_vault:
             lines.append("# Add your project setup here (venv, aliases, env vars)")
             lines.append("")
     else:
         lines.append("# init.sh — runs inside the sandbox after project loads")
         lines.append("")
+        if home_in_vault:
+            lines.append("# HOME is inside the vault — create it on first launch")
+            lines.append('mkdir -p "$PWRAP_VAULT_DIR/.home"')
+            lines.append("")
         if has_venv:
             lines.append("# Virtual environment activation")
             lines.append("source .venv/bin/activate")
@@ -413,7 +494,7 @@ def generate_init_script(
             lines.append("# Encrypted vault is available at $PWRAP_VAULT_DIR")
             lines.append('# Example: export MY_APP_STATE="$PWRAP_VAULT_DIR/state"')
             lines.append("")
-        if not has_venv and not env_vars and not vault_mountpoint:
+        if not has_venv and not env_vars and not vault_mountpoint and not home_in_vault:
             lines.append("# Add your project setup here (venv, aliases, env vars)")
             lines.append("")
 
@@ -517,32 +598,81 @@ def run_guide(
     env_vars: dict[str, str] = {}
     vault_mountpoint: str | None = None
     vault_shared = False
+    blacklist_mnt = True
+    home_in_vault = False
 
     if sandbox_enabled:
         # --- Q4: Docker ---
+        # On WSL2 with Docker Desktop, the socket only exists when Docker
+        # Desktop is running. Ask anyway so the user can configure it ahead
+        # of time.
+        on_wsl = is_wsl()
         docker_socket = find_docker_socket()
-        has_docker_hint = features.has_docker or docker_socket is not None
+        has_docker_hint = features.has_docker or docker_socket is not None or on_wsl
         if has_docker_hint:
-            need_docker = prompter.confirm("  Need access to Docker?", default=features.has_docker)
-            if need_docker and docker_socket:
-                writable.append(docker_socket)
-                print(f"    → Will expose {docker_socket}")
-            elif need_docker and not docker_socket:
-                print("    → No docker socket found on this host.")
-                print("      You can add one manually to 'writable' in the config.")
+            need_docker = prompter.confirm(
+                "  Need access to Docker? (exposes docker socket = root on host)",
+                default=features.has_docker,
+            )
+            if need_docker:
+                if docker_socket:
+                    writable.append(docker_socket)
+                    print(f"    → Will expose {docker_socket}")
+                elif on_wsl:
+                    expected = find_wsl_docker_socket_path()
+                    if expected:
+                        print(
+                            "    → Docker Desktop socket not found "
+                            "(Docker Desktop may not be running)."
+                        )
+                        print(f"      Expected path: {expected}")
+                        print(
+                            "      Add it to 'writable' in the config "
+                            "when Docker Desktop is running."
+                        )
+                    else:
+                        print("    → No docker socket found on this host.")
+                        print(
+                            "      You can add one manually to 'writable' "
+                            "in the config."
+                        )
+                else:
+                    print("    → No docker socket found on this host.")
+                    print(
+                        "      You can add one manually to 'writable' "
+                        "in the config."
+                    )
 
         # --- Q5: Network isolation ---
         unshare_net = prompter.confirm(
             "  Isolate network? (no internet access in sandbox)", default=False
         )
 
-        # --- Q6: Clean environment ---
+        # --- Q6: WSL detection ---
+        wsl_resolv_whitelisted = False
+        if on_wsl:
+            print("    → WSL detected.")
+            need_mnt = prompter.confirm(
+                "  Need access to Windows drives (/mnt/c, /mnt/d, ...)?",
+                default=False,
+            )
+            if need_mnt:
+                blacklist_mnt = False
+                print("    → /mnt will NOT be blacklisted (Windows drives visible).")
+                print("      Warning: Docker Desktop sockets under /mnt/wsl are masked")
+                print("      by default, but other files under /mnt are exposed.")
+            elif not unshare_net and wsl_needs_resolv_whitelist():
+                # DNS needs resolv.conf which is a symlink into /mnt/wsl
+                wsl_resolv_whitelisted = True
+                print("    → Whitelisting /mnt/wsl/resolv.conf for DNS resolution.")
+
+        # --- Q7: Clean environment ---
         clean_env = prompter.confirm(
             "  Clean environment? (only PATH/HOME/USER/SHELL/TERM/LANG pass through)",
             default=True,
         )
 
-        # --- Q7: Encrypted vault ---
+        # --- Q8: Encrypted vault ---
         vault_candidates: list[tuple[str, str]] = []
         if features.env_files:
             for f in features.env_files:
@@ -578,26 +708,65 @@ def run_guide(
             if "ai_chat" in selected:
                 env_vars["AICHAT_CONFIG_DIR"] = "vault/aichat"
 
-        # --- Q8: Home whitelist ---
+            # --- Q8b: HOME inside vault ---
+            home_in_vault = prompter.confirm(
+                "  Set HOME inside the vault? (all shell/tool state encrypted at rest)",
+                default=False,
+            )
+            if home_in_vault:
+                env_vars["HOME"] = str(resolved_dir / "vault" / ".home")
+                print(f"    → HOME will be {resolved_dir / 'vault' / '.home'}")
+
+                # If clean_env is off, host XDG vars would override
+                # HOME-relative defaults and point tools at host paths
+                # (which are blacklisted in the sandbox).
+                if not clean_env:
+                    host_xdg = find_host_xdg_vars()
+                    if host_xdg:
+                        print(
+                            f"    → Warning: host has XDG vars set "
+                            f"({', '.join(host_xdg)}) that would override"
+                        )
+                        print(
+                            "      HOME-relative paths inside the vault."
+                        )
+                        enable_clean = prompter.confirm(
+                            "    Enable clean_env to strip host XDG vars?",
+                            default=True,
+                        )
+                        if enable_clean:
+                            clean_env = True
+                            print("    → clean_env enabled.")
+
+        # --- Q9: Home whitelist ---
         wl_candidates = find_whitelist_candidates(shell)
-        if wl_candidates:
-            # Pre-select shell config and gitconfig
+        # Add WSL resolv.conf as a pre-selected candidate if needed
+        wsl_candidates: list[tuple[str, str]] = []
+        if wsl_resolv_whitelisted:
+            wsl_candidates.append(
+                ("/mnt/wsl/resolv.conf", "WSL DNS resolution (resolv.conf)")
+            )
+        all_wl_candidates = wsl_candidates + wl_candidates
+        if all_wl_candidates:
+            # Pre-select shell config, gitconfig, and WSL resolv.conf
             defaults = set()
-            for path, desc in wl_candidates:
+            for path, desc in all_wl_candidates:
                 desc_lower = desc.lower()
                 is_shell_cfg = "shell config" in desc_lower or (
                     "config" in desc_lower and "fish" in desc_lower
                 )
                 if is_shell_cfg or path == "~/.gitconfig":
                     defaults.add(path)
+                if path == "/mnt/wsl/resolv.conf":
+                    defaults.add(path)
             selected_wl = prompter.multi_select(
                 "  Whitelist home paths (read-only access)?",
-                wl_candidates,
+                all_wl_candidates,
                 defaults=defaults,
             )
             whitelist = sorted(selected_wl)
 
-    # --- Q9: Venv activation ---
+    # --- Q10: Venv activation ---
     activate_venv = False
     if features.has_venv:
         activate_venv = prompter.confirm(
@@ -621,6 +790,7 @@ def run_guide(
         env_vars=env_vars if env_vars else None,
         vault_mountpoint=vault_mountpoint,
         vault_shared=vault_shared,
+        blacklist_mnt=blacklist_mnt,
     )
 
     init_content = generate_init_script(
@@ -628,6 +798,7 @@ def run_guide(
         has_venv=activate_venv,
         vault_mountpoint=vault_mountpoint,
         env_vars=env_vars if env_vars else None,
+        home_in_vault=home_in_vault,
     )
 
     # --- Write files ---
