@@ -12,6 +12,7 @@ from .core import (
     run_project,
 )
 from .deps import check_optional_deps
+from .guide import run_guide
 from .scaffold import create_project, ensure_templates
 
 
@@ -30,6 +31,11 @@ def main(argv: list[str] | None = None) -> int:
         "--new",
         metavar="DIR",
         help="Create a new project config with DIR as the project directory",
+    )
+    parser.add_argument(
+        "--guide",
+        metavar="DIR",
+        help="Guided setup: interactively convert an existing folder into a pwrap config",
     )
     parser.add_argument(
         "--no-sandbox",
@@ -88,6 +94,14 @@ def main(argv: list[str] | None = None) -> int:
                 shell=args.shell,
             )
             print(f"Created {config_path}")
+            return 0
+
+        if args.guide:
+            config_path = run_guide(
+                args.guide,
+                name=args.project or None,
+                shell=args.shell,
+            )
             return 0
 
         if args.list or not args.project:

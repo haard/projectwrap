@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Add `pwrap --guide <dir>` — guided setup wizard that interactively converts
+  an existing folder into a pwrap config. Auto-detects project features
+  (venv, Docker, `.env` files, git, language) and asks targeted questions:
+  sandbox on/off, Docker access (auto-detects the socket), network isolation,
+  clean environment, encrypted vault for secrets (`.env` files, shell history,
+  Claude state), home paths to whitelist, and venv activation. Generates a
+  customized `project.toml` and init script, and optionally initializes a
+  gocryptfs encrypted volume — `guide.py`, `cli.py`, `README.md`
+
 ## 202610.0.0
 
 - **Breaking:** shared vault sessions (`shared = true`) no longer use a vault

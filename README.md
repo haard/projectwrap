@@ -66,6 +66,13 @@ Check optional dependencies with `pwrap --check-deps`.
 #### Quick Start ####
 
 ```bash
+pwrap --guide ~/projects/myproject  # guided setup: answer questions, get a working config
+pwrap myproject                     # launch sandboxed shell
+```
+
+Or use the template-based approach:
+
+```bash
 pwrap --new ~/projects/myproject    # creates config + init script
 # edit ~/.config/pwrap/myproject/project.toml and init script
 pwrap myproject                     # launch sandboxed shell
@@ -73,6 +80,39 @@ pwrap myproject                     # launch sandboxed shell
 
 On first run, `--new` creates editable templates in `~/.config/pwrap/`. Edit them
 to set your defaults, then run `--new` again.
+
+#### Guided Setup ####
+
+`pwrap --guide <dir>` walks you through converting an existing folder into a
+pwrap config. It auto-detects project features (venv, Docker, `.env` files,
+git, language) and asks targeted questions:
+
+- Project name and shell
+- Sandbox on/off
+- Docker access (auto-detects the socket on your host)
+- Network isolation
+- Clean environment
+- Encrypted vault for secrets (`.env` files, shell history, Claude state)
+- Home paths to whitelist (shell config, git, SSH, etc.)
+- Venv activation in the init script
+
+```bash
+pwrap --guide ~/projects/myproject
+# Detected: Python venv (.venv/), Docker (compose/Dockerfile), env files (.env)
+#   Project name [myproject]:
+#   Shell [/usr/bin/fish]:
+#   Enable sandbox isolation? [Y/n]:
+#   Need access to Docker? [y/N]:
+#   ...
+# Created: ~/.config/pwrap/myproject/project.toml
+# Launch with: pwrap myproject
+```
+
+You can also pass the name and shell non-interactively:
+
+```bash
+pwrap --guide ~/projects/myproject myproject --shell /bin/bash
+```
 
 #### Examples ####
 
@@ -368,6 +408,7 @@ is released.
 pwrap                                      # list projects
 pwrap myproject                            # launch project
 pwrap -v myproject                         # verbose output
+pwrap --guide ~/projects/myproject         # guided setup for existing folder
 pwrap --new ~/projects/myproject           # create config (name = dir basename)
 pwrap --new --shell /bin/bash ~/projects/x # specify shell
 pwrap --check-deps                         # check optional dependencies
