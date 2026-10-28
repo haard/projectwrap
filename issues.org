@@ -6,7 +6,7 @@
 the scaffold extraction. =bwrap.py= is the next natural seam — isolates the
 security-relevant argv construction so it's easier to audit.
 
-* TODO [#B] Clarify that blacklisting is template-only and home is readable by default (audit F4)
+* DONE [#B] Clarify that blacklisting is template-only and home is readable by default (audit F4)
 README "Security Defaults" lists =/mnt= and credential-dir blacklisting in a way that reads as
 "always enforced". Only the template applies them; the sandbox code does not. Users who edit the
 template away or start from scratch can believe they're protected when they aren't. Verified live
@@ -16,7 +16,9 @@ in the 2026-10-10 audit: with a minimal config (=enabled = true= only) the sandb
 keeps the template's =blacklist=. Given the stated goal ("one npm install away from pwned AWS
 credentials"), read access is the primary threat. Fix: documentation only — clarify in README
 "Security Defaults" that home is bound read-only (readable) by default and that hiding credentials
-is opt-in via =blacklist=.
+is opt-in via =blacklist=. Fixed: README "Security Defaults" now states home is bound read-only
+(readable) by default and frames blacklisting as template behavior ("Default template uses
+deny-by-default home") — README.md:433,441-444.
 
 * TODO [#C] Clarify README on docker socket masking mechanism
 README "Security Defaults" says "Docker socket ... masked — =connect()= works on ro-bound
@@ -35,6 +37,51 @@ top.
 * TODO [#C] Tighten run_vault docstring
 ~vault.py:run_vault~ claims "does not return on success for the primary path" but
 ~_attach_to_primary~ returns an int normally. Reword to describe both paths accurately.
+
+* TODO [#B] Feature: vault the entire project directory (--new/--guide)
+The vault is always a separate gocryptfs volume mounted at a subfolder
+(=mountpoint = <project>/vault=, hardcoded at ~guide.py:560~). Users who want the
+whole project encrypted at rest (code, .git, .env, agent/vibe history) currently
+have to hand-write =mountpoint = <dir>= — which the runtime already supports:
+nothing in =validate.py= or =core.py= forbids =mountpoint == dir=, and the
+unshare → gocryptfs → bwrap chain mounts the cipherdir over the project dir
+before bwrap binds it into the sandbox. What is missing is the creation-time UX
+and safe migration:
+- =--guide=: offer "entire project directory" as a vault layout choice next to
+  the current secrets-subfolder default; set =mountpoint = <project dir>=.
+- =--new= (~scaffold.py:create_project~, =cli.py=): add a flag (e.g.
+  =pwrap --new --vault <dir>=) that renders =[encrypted]= with
+  =mountpoint = <dir>= and runs =gocryptfs -init=.
+- Migration: =--guide= runs on existing folders and gocryptfs has no
+  encrypt-in-place, so: init the cipherdir, mount at a temp dir, =cp -a= the
+  project in, unmount, then move the original contents out. Refuse a non-empty
+  project dir without explicit migration confirmation — leftover plaintext is
+  shadowed by the mount in-sandbox but remains on the host (two sources of
+  truth).
+- Guard rail (=core.py=): reject =cipherdir= at or under =mountpoint=
+  (recursive/shadowed ciphertext); keep the cipherdir under
+  =~/.config/pwrap/<name>/= (already tmpfs'd inside the sandbox).
+Trade-off to document: with =mountpoint == dir= the host project dir is an empty
+mount target — the project becomes sandbox-only (no host git/editor/CI), and
+FUSE quirks apply to hardlink-heavy trees (node_modules, .venv). The alternative
+layout (project folder itself is the cipherdir, =dir= points at a separate
+mountpoint) is more invasive; out of scope for this item.
+Fix: implement the above + tests (guide flow, scaffold flag, guard rail) and a
+README example.
+
+* TODO [#B] Harden unpack extraction filter against hardlink-through-symlink
+~pack.py:_make_extract_filter~ checks hardlink members (=member.islnk()=) only
+lexically: the linkname must not be absolute and must not contain =..=. It does
+not resolve the linkname through symlinks on disk. A malicious archive could
+contain a symlink member (=link -> /tmp=) followed by a hardlink member
+(=a -> link/important_file=); when extracted, =a= becomes a hardlink inside the
+dest that shares an inode with =/tmp/important_file= — writes to =a= modify the
+outside file. Impact is limited: the attacker can only link to existing files
+(no new files created outside the dest), and the threat model is archives from
+trusted =pwrap pack= runs. Fix: for hardlink members, resolve the linkname
+through the dest directory and verify the resolved path stays under
+=dest_resolved= (same check already applied to regular file members). Add a
+regression test with a symlink + hardlink pair.
 
 * Security audit 2026-10-10
 Findings from a security review of pwrap grounded in the claims/goals in =README.md=. Method:
@@ -82,11 +129,12 @@ One task; add tests where missing and sane:
 - Mask list covers podman/containerd/crio/docker-cli.sock (F1).
 - ~check_config_permissions~ rejects a world-writable grandparent and a
   foreign-owned config file (F5).
-- Single-mode vault: lock released and no lingering gocryptfs daemon after
-  exit (F3) — integration-marked.
+- DONE (2026-10-11): Single-mode vault: lock released and no lingering
+  gocryptfs daemon after exit (F3) — integration-marked
+  (test_single_vault_teardown_on_normal_exit / _after_sigkill).
 - ~guide.generate_init_script~ quotes env values (F8).
 
-* TODO [#B] F3: Single-mode vault leaks a gocryptfs daemon; lock poisons next launch
+* DONE [#B] F3: Single-mode vault leaks a gocryptfs daemon; lock poisons next launch
 Verified live: after a single-mode session exits cleanly, the gocryptfs
 daemon forked inside the unshared mount namespace lingers indefinitely and
 holds the inheritable lock fd, so the next launch of the same project falsely
@@ -100,7 +148,14 @@ cipherdir can corrupt it). Shared mode is unaffected (~serve~ runs
 =fusermount -u= in its =finally=).
 Fix: in ~_run_single~ (~vault.py:230~), tear the mount down on shell exit
 (e.g. run gocryptfs in the foreground as a child of the inner shell and
-=fusermount -u= via trap), or reuse the serve teardown path.
+=fusermount -u= via trap), or reuse the serve teardown path. Fixed 2026-10-11:
+~_run_single~ (~vault.py:268~) now forks a watcher subshell
+(~_vault_watcher_script~, ~vault.py:232~) that ignores HUP/INT/TERM, waits for
+the main process to exit (zombie counts as exited), then =fusermount -u= and
+kills the daemon (found by mount-ns match, so concurrent sessions are never
+affected); the lock fd is closed before =exec bwrap= so the sandbox never
+holds it. Integration tests: test_single_vault_teardown_on_normal_exit,
+test_single_vault_teardown_after_sigkill, test_single_vault_wrong_password_fails_closed.
 
 * TODO [#B] F5: Harden config permission checks (config root + ownership)
 ~validate.py:64~ (=check_config_permissions~) checks only the file and its

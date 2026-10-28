@@ -13,14 +13,82 @@ from .core import (
 )
 from .deps import check_optional_deps
 from .guide import run_guide
+from .pack import pack_project, unpack_archive
 from .scaffold import create_project, ensure_templates
+
+
+def _exit_code(e: SystemExit) -> int:
+    """Convert a SystemExit into a process exit code."""
+    if isinstance(e.code, int):
+        return e.code
+    print(f"Error: {e.code}", file=sys.stderr)
+    return 1
+
+
+def _pack_cli(argv: list[str]) -> int:
+    """Handle `pwrap pack <project> [-o FILE]`."""
+    parser = argparse.ArgumentParser(
+        prog="pwrap pack",
+        description="Pack a project (folder, config, vault) into a tar.gz archive",
+    )
+    parser.add_argument("project", help="Project name to pack")
+    parser.add_argument(
+        "-o",
+        "--output",
+        metavar="FILE",
+        help="Output archive (default: <name>.pwrap.tar.gz in the current directory)",
+    )
+    args = parser.parse_args(argv)
+    try:
+        archive = pack_project(args.project, output=args.output)
+    except SystemExit as e:
+        return _exit_code(e)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    print(f"Created {archive}")
+    return 0
+
+
+def _unpack_cli(argv: list[str]) -> int:
+    """Handle `pwrap unpack <file> <path> [--force]`."""
+    parser = argparse.ArgumentParser(
+        prog="pwrap unpack",
+        description="Unpack a pwrap archive onto this workstation",
+    )
+    parser.add_argument("archive", help="Archive created by pwrap pack")
+    parser.add_argument("path", help="New project directory")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing config dir / unpack over non-empty target dirs",
+    )
+    args = parser.parse_args(argv)
+    try:
+        unpack_archive(args.archive, args.path, force=args.force)
+    except SystemExit as e:
+        return _exit_code(e)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point."""
+    if argv is None:
+        argv = sys.argv[1:]
+
+    if argv[:1] == ["pack"]:
+        return _pack_cli(argv[1:])
+    if argv[:1] == ["unpack"]:
+        return _unpack_cli(argv[1:])
+
     parser = argparse.ArgumentParser(
         prog="pwrap",
         description="Isolated project environments with bubblewrap sandboxing",
+        epilog="Subcommands: pwrap pack <project> [-o FILE], "
+        "pwrap unpack <file> <path> [--force]",
     )
     parser.add_argument(
         "project",

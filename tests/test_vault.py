@@ -162,3 +162,30 @@ class TestPasswordVerifier:
         # The verifier must not contain the password itself.
         salt, digest = _password_verifier("hunter2")
         assert b"hunter2" not in salt + digest
+
+
+class TestVaultWatcherScript:
+    """Pin the security-relevant shape of the single-mode teardown snippet."""
+
+    def test_closes_lock_fd(self):
+        # The sandbox must not inherit the project lock fd (bwrap does not
+        # close inherited fds).
+        script = vault._vault_watcher_script("/mnt/vault", 3)
+        assert "exec 3>&-" in script
+
+    def test_ignores_terminal_signals(self):
+        # The watcher must survive the signals that kill the main process.
+        script = vault._vault_watcher_script("/mnt/vault", 3)
+        assert "trap '' HUP INT TERM" in script
+
+    def test_unmounts_and_kills_daemon_by_mount_ns(self):
+        # Graceful unmount first, then kill the daemon found via its mount
+        # namespace (concurrent sessions live in other namespaces).
+        script = vault._vault_watcher_script("/mnt/vault", 3)
+        assert "fusermount -u /mnt/vault" in script
+        assert 'readlink "$d/ns/mnt"' in script
+        assert 'kill "${d#/proc/}"' in script
+
+    def test_quotes_mountpoint(self):
+        script = vault._vault_watcher_script("/mnt/my vault", 3)
+        assert "fusermount -u '/mnt/my vault'" in script

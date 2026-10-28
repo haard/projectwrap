@@ -1,7 +1,40 @@
 # Changelog
 
-## Unreleased
+## 202610.1.0
 
+- Known limitation: `pwrap unpack` extraction filter does not resolve hardlink
+  targets through symlinks. A malicious archive containing a symlink member
+  followed by a hardlink member whose linkname is relative but resolves
+  through that symlink (e.g. `link -> /tmp` then hardlink `a -> link/file`)
+  could create a hardlink inside the extraction directory that shares an inode
+  with a file outside it. Impact is limited to linking to existing files (no
+  new files created outside the dest), and the threat model is archives from
+  trusted `pwrap pack` runs. Fix planned — `pack.py:_make_extract_filter`
+
+- Add `pwrap pack <project> [-o FILE]` and `pwrap unpack <file> <path> [--force]`
+  for moving a project between workstations. `pack` writes a `.pwrap.tar.gz`
+  containing the project folder, the config (`project.toml` + init scripts),
+  and the gocryptfs cipherdir if `[encrypted]` is configured (ciphertext only —
+  the vault password is never stored). A currently mounted vault mountpoint is
+  excluded from the project files so decrypted plaintext never lands in the
+  archive. `unpack` installs the config into `~/.config/pwrap/<name>/`, unpacks
+  the project into the given path, extracts the vault, and rewrites every
+  config path that pointed inside the old project directory (`dir`,
+  blacklist/whitelist/writable entries, `[encrypted]` paths, `[env]` values)
+  to the new location. The rewritten config is validated before anything is
+  installed: schema errors abort, and blacklist/writable entries that don't
+  exist on the new host are commented out (same as `pwrap --new`). Extraction
+  is hardened against path traversal and symlink escapes. Note: `pack` and
+  `unpack` are now reserved words — a project literally named `pack` or
+  `unpack` can no longer be launched positionally — `pack.py`, `cli.py`,
+  `scaffold.py`, `README.md`
+- Fix single-mode vault leak: the gocryptfs daemon outlived the session,
+  keeping its mount namespace alive and holding the project flock — stale
+  daemons caused false "another session is active" prompts and blocked
+  shared-mode attach. A watcher subshell now unmounts and reaps the daemon
+  when the session exits, including when the main process is killed by a
+  signal, and the sandbox no longer inherits the project lock fd (bwrap
+  does not close inherited fds) — `vault.py`
 - Add `pwrap --guide <dir>` — guided setup wizard that interactively converts
   an existing folder into a pwrap config. Auto-detects project features
   (venv, Docker, `.env` files, git, language) and asks targeted questions:

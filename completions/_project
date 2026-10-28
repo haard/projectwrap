@@ -11,15 +11,40 @@ _pwrap() {
         projects=(${config_dir}/*(N:t))
     fi
 
-    _arguments \
-        '(-l --list)'{-l,--list}'[List available projects]' \
-        '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
-        '--check-deps[Check optional dependencies]' \
-        '--new[Create new project config]:directory:_directories' \
-        '--no-sandbox[Disable sandbox in generated config]' \
-        '--version[Show version]' \
-        '(-h --help)'{-h,--help}'[Show help]' \
-        '1:project:'"(${projects[*]})"
+    # First argument: subcommand or project name
+    if (( CURRENT == 2 )); then
+        _alternative \
+            "subcommands:subcommand:(pack unpack)" \
+            "projects:project:(${projects[*]})"
+        return 0
+    fi
+
+    case "${words[2]}" in
+        pack)
+            _arguments \
+                '(-o --output)'{-o,--output}'[Output archive]:file:_files' \
+                '(-h --help)'{-h,--help}'[Show help]' \
+                '1:project:(${projects[*]})'
+            ;;
+        unpack)
+            _arguments \
+                '--force[Replace existing config / unpack over non-empty dirs]' \
+                '(-h --help)'{-h,--help}'[Show help]' \
+                '1:archive:_files -g "*.pwrap.tar.gz"' \
+                '2:new project directory:_directories'
+            ;;
+        *)
+            _arguments \
+                '(-l --list)'{-l,--list}'[List available projects]' \
+                '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--check-deps[Check optional dependencies]' \
+                '--new[Create new project config]:directory:_directories' \
+                '--no-sandbox[Disable sandbox in generated config]' \
+                '--version[Show version]' \
+                '(-h --help)'{-h,--help}'[Show help]' \
+                '1:project:(${projects[*]})'
+            ;;
+    esac
 }
 
 _pwrap "$@"

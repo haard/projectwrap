@@ -4,6 +4,8 @@ Two modes, both driven by `run_vault`:
 
 - shared=False: unshare + gocryptfs + bwrap in one exec chain. A flock on the
   project lockfile detects concurrent sessions and prompts before joining.
+  A watcher subshell reaps the gocryptfs daemon when the session exits, so
+  the mount namespace and the flock do not linger.
 - shared=True: the first terminal acquires the flock and re-execs into `serve`,
   which mounts gocryptfs, forks the primary bwrap via `_pty_proxy`, and listens
   on a unix socket for additional terminals to attach. Attaching requires the
@@ -227,8 +229,48 @@ def run_vault(config: VaultConfig, bwrap_argv: list[str]) -> int:
     return _attach_to_primary(config, bwrap_argv)
 
 
+def _vault_watcher_script(mountpoint: str, lock_fd: int) -> str:
+    """Shell snippet forked before exec'ing bwrap in single-vault mode.
+
+    gocryptfs daemonizes: the daemon stays in the unshare'd mount namespace
+    and inherits the lock fd, so without explicit teardown the mount
+    namespace and the project flock would linger after the session ends.
+    The watcher ignores HUP/INT/TERM (so it survives the terminal signals
+    that kill the main process), waits for the main process to exit — a
+    zombie counts as exited, so cleanup does not depend on the parent
+    reaping promptly — then unmounts and kills the daemon. The daemon is
+    found by matching its mount namespace, so concurrent sessions of the
+    same project are never affected. The lock fd is closed before exec'ing
+    bwrap: bwrap does not close inherited fds, and the sandbox must not
+    hold the project lock. The daemon and the watcher keep their inherited
+    copies, so the session still holds the lock for its lifetime.
+    """
+    m = shlex.quote(mountpoint)
+    return (
+        f"MAIN=$$\n"
+        f"( trap '' HUP INT TERM\n"
+        f"  while kill -0 $MAIN 2>/dev/null "
+        f"&& ! grep -q '^State:[[:space:]]*Z' /proc/$MAIN/status 2>/dev/null; do\n"
+        f"    sleep 0.5\n"
+        f"  done\n"
+        f"  fusermount -u {m} 2>/dev/null\n"
+        f"  SELF_NS=$(readlink /proc/self/ns/mnt)\n"
+        f"  for d in /proc/[0-9]*; do\n"
+        f"    [ \"$(cat \"$d/comm\" 2>/dev/null)\" = \"gocryptfs\" ] || continue\n"
+        f"    [ \"$(readlink \"$d/ns/mnt\" 2>/dev/null)\" = \"$SELF_NS\" ] "
+        f"&& kill \"${{d#/proc/}}\" 2>/dev/null\n"
+        f"  done\n"
+        f") >/dev/null 2>&1 &\n"
+        f"exec {lock_fd}>&-\n"
+    )
+
+
 def _run_single(config: VaultConfig, bwrap_argv: list[str]) -> int:
-    """shared=False path: one unshare + gocryptfs + bwrap exec chain."""
+    """shared=False path: one unshare + gocryptfs + bwrap exec chain.
+
+    Everything after `&&` is grouped so a failed mount (wrong password)
+    aborts before bwrap starts — the sandbox must never launch unmounted.
+    """
     lock_fd = _check_concurrent(config.project_name)
     if lock_fd is None:
         return 130
@@ -240,8 +282,10 @@ def _run_single(config: VaultConfig, bwrap_argv: list[str]) -> int:
     bwrap_cmd = " ".join(shlex.quote(a) for a in bwrap_with_uid)
     inner = (
         f"gocryptfs {shlex.quote(str(config.cipherdir))} "
-        f"{shlex.quote(str(config.mountpoint))} && "
-        f"exec {bwrap_cmd}"
+        f"{shlex.quote(str(config.mountpoint))} && {{\n"
+        f"{_vault_watcher_script(str(config.mountpoint), lock_fd)}"
+        f"exec {bwrap_cmd}\n"
+        f"}}"
     )
     argv = [
         "unshare", "--user", "--mount", "--map-root-user",

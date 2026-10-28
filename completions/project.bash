@@ -5,6 +5,36 @@
 _pwrap_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/pwrap"
+    local -a projects=()
+
+    if [[ -d "${config_dir}" ]]; then
+        projects=($(ls -1 "${config_dir}" 2>/dev/null | grep -v '^\.'))
+    fi
+
+    # First word: subcommand or project name
+    if [[ ${COMP_CWORD} -eq 1 ]]; then
+        COMPREPLY=($(compgen -W "pack unpack ${projects[*]}" -- "${cur}"))
+        return 0
+    fi
+
+    case "${COMP_WORDS[1]}" in
+        pack)
+            if [[ ${cur} == -* ]]; then
+                COMPREPLY=($(compgen -W "-o --output -h --help" -- "${cur}"))
+            else
+                COMPREPLY=($(compgen -W "${projects[*]}" -- "${cur}"))
+            fi
+            return 0
+            ;;
+        unpack)
+            if [[ ${cur} == -* ]]; then
+                COMPREPLY=($(compgen -W "--force -h --help" -- "${cur}"))
+            else
+                COMPREPLY=($(compgen -f -- "${cur}"))
+            fi
+            return 0
+            ;;
+    esac
 
     # Options
     if [[ ${cur} == -* ]]; then
@@ -13,10 +43,7 @@ _pwrap_completions() {
     fi
 
     # Project names
-    if [[ -d "${config_dir}" ]]; then
-        local projects=$(ls -1 "${config_dir}" 2>/dev/null | grep -v '^\.')
-        COMPREPLY=($(compgen -W "${projects}" -- "${cur}"))
-    fi
+    COMPREPLY=($(compgen -W "${projects[*]}" -- "${cur}"))
 }
 
 complete -F _pwrap_completions pwrap

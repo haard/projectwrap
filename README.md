@@ -413,6 +413,31 @@ inside the sandbox, so it cannot leak out and be re-used from the outside.
 When the primary exits, all attached terminals are terminated and the mount
 is released.
 
+#### Moving projects between machines ####
+
+```bash
+pwrap pack myproject                       # → myproject.pwrap.tar.gz
+pwrap pack myproject -o backup.tar.gz      # choose the output path
+# ... copy the archive to the other workstation ...
+pwrap unpack myproject.pwrap.tar.gz ~/projects/myproject
+```
+
+`pack` bundles the project folder, the config (`project.toml` + init scripts),
+and the encrypted vault if `[encrypted]` is configured. The vault cipherdir is
+ciphertext, so it is safe to move; the gocryptfs password is never stored in
+the archive. If the vault is currently mounted, its decrypted contents are
+excluded from the project files. `[env]` values are stored in plaintext —
+pack prints a warning if your config has any.
+
+`unpack` installs the config into `~/.config/pwrap/<name>/`, unpacks the
+project into the given path, and rewrites every config path that pointed
+inside the old project directory (`dir`, blacklist/whitelist/writable entries,
+`[encrypted]` paths, `[env]` values) to the new location. The rewritten config
+is validated before anything is installed: schema errors abort the unpack, and
+blacklist/writable entries that don't exist on the new host are commented out
+(same behavior as `pwrap --new`). Existing configs or non-empty target
+directories are refused unless you pass `--force`.
+
 #### Usage ####
 
 ```bash
@@ -422,6 +447,8 @@ pwrap -v myproject                         # verbose output
 pwrap --guide ~/projects/myproject         # guided setup for existing folder
 pwrap --new ~/projects/myproject           # create config (name = dir basename)
 pwrap --new --shell /bin/bash ~/projects/x # specify shell
+pwrap pack myproject                       # pack project into an archive
+pwrap unpack myproject.pwrap.tar.gz ~/projects/myproject  # unpack on another machine
 pwrap --check-deps                         # check optional dependencies
 pwrap --version                            # show version
 ```

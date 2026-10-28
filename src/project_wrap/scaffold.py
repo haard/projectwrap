@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from . import core
@@ -14,12 +15,19 @@ _LIST_START_RE = re.compile(r"^\s*(\w+)\s*=\s*\[")
 _STRING_ENTRY_RE = re.compile(r'^\s*"([^"]*)"')
 
 
-def _comment_missing_paths(toml_text: str) -> str:
+def _comment_missing_paths(
+    toml_text: str,
+    exists: Callable[[str], bool] | None = None,
+) -> str:
     """Comment out blacklist/whitelist/writable entries whose paths don't exist.
 
     Line-based so template comments and formatting survive. Only uncommented
     string entries are considered; already-commented lines are left as-is.
+    `exists` overrides the path-existence check (used by unpack, where paths
+    under the new project dir only exist in the staging area).
     """
+    if exists is None:
+        exists = lambda entry: core.expand_path(entry).exists()  # noqa: E731
     out: list[str] = []
     in_scanned_list = False
     for line in toml_text.splitlines():
@@ -38,7 +46,7 @@ def _comment_missing_paths(toml_text: str) -> str:
             out.append(line)
             continue
         entry = _STRING_ENTRY_RE.match(line)
-        if entry and not core.expand_path(entry.group(1)).exists():
+        if entry and not exists(entry.group(1)):
             indent = line[: len(line) - len(stripped)]
             out.append(f"{indent}# {stripped}  # path not found on host")
             continue
