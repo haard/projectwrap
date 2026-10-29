@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Fix shared-vault lock fd leak into the sandbox: the project lock fd was
+  inherited by bwrap (which does not close inherited fds) and propagated into
+  every process inside the sandbox. After the primary session exited, the lock
+  survived as long as any sandbox process was alive, causing false "another
+  session is active" prompts and blocking new primary sessions. `_pty_proxy`
+  now closes the lock fd before `pty.fork()`; `serve` receives it via a new
+  `--lock-fd` argument — `vault.py`
+
 ## 202610.1.0
 
 - Known limitation: `pwrap unpack` extraction filter does not resolve hardlink

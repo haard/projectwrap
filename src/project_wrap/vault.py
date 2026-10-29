@@ -14,7 +14,10 @@ Two modes, both driven by `run_vault`:
   cannot leak out and be re-used from the outside. When the primary exits,
   all attached clients are torn down and the mount is released. No background
   daemon — the serve process stays in the foreground of the terminal that
-  launched it.
+  launched it. The lock fd is closed in forked children before exec'ing bwrap
+  so the sandbox never holds the project lock (bwrap does not close inherited
+  fds — without this, the lock survives serve's death as long as any sandbox
+  process is alive).
 """
 
 from __future__ import annotations
@@ -134,16 +137,32 @@ def _recv_fds(sock: socket.socket, maxfds: int = 3) -> tuple[bytes, list[int]]:
 # --- pty proxy ---
 
 
-def _pty_proxy(bwrap_argv: list[str], client_fds: list[int]) -> None:
+def _pty_proxy(
+    bwrap_argv: list[str],
+    client_fds: list[int],
+    close_fds: list[int] | None = None,
+) -> None:
     """Run bwrap inside a pty and proxy I/O to client fds.
 
     Gives the shell a proper controlling terminal (needed for fish job control).
     Runs in a forked child of serve — does not return; exits with bwrap's status.
+
+    `close_fds` are closed before pty.fork() so bwrap (which does not close
+    inherited fds) never sees them. Used to keep the project lock fd out of
+    the sandbox — otherwise the lock survives the serve process's death as
+    long as any sandbox process is alive.
     """
     import pty
     import select
     import termios
     import tty
+
+    if close_fds:
+        for fd in close_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     client_in, client_out = client_fds[0], client_fds[1]
 
@@ -340,6 +359,7 @@ def _exec_primary_serve(
         "--real-uid", str(os.getuid()),
         "--real-gid", str(os.getgid()),
         "--bwrap-argv", json.dumps(bwrap_argv),
+        "--lock-fd", str(lock_fd),
     ]
     os.execvp("unshare", argv)
 
@@ -436,12 +456,18 @@ def serve(
     bwrap_argv: list[str],
     real_uid: int,
     real_gid: int,
+    lock_fd: int | None = None,
 ) -> None:
     """Primary session: mount, fork primary bwrap, accept attached clients.
 
     Called via `python -m project_wrap.vault serve ...` after unshare. Runs in
     the foreground of the launching terminal. Exits with the primary bwrap's
     exit status after tearing down any attached clients and unmounting.
+
+    `lock_fd` is the project flock fd inherited across the exec chain. It is
+    closed in forked children before exec'ing bwrap so the sandbox never
+    holds the lock — otherwise the lock survives serve's death as long as
+    any sandbox process is alive.
     """
     # Read the password here (not via gocryptfs's own prompt) so it can be
     # verified against later attaches. It is piped to gocryptfs over stdin
@@ -482,7 +508,7 @@ def serve(
     primary_pid = os.fork()
     if primary_pid == 0:
         server.close()
-        _pty_proxy(primary_argv, [0, 1, 2])
+        _pty_proxy(primary_argv, [0, 1, 2], close_fds=[lock_fd] if lock_fd is not None else None)
         sys.exit(1)  # unreachable
 
     # Parent: redirect stdio so we don't fight the pty-proxied primary for the tty
@@ -580,7 +606,7 @@ def serve(
             proxy_pid = os.fork()
             if proxy_pid == 0:
                 server.close()
-                _pty_proxy(child_argv, fds)
+                _pty_proxy(child_argv, fds, close_fds=[lock_fd] if lock_fd is not None else None)
                 sys.exit(1)  # unreachable
 
             for fd in fds:
@@ -672,6 +698,12 @@ def main() -> None:
     parser.add_argument("--real-uid", type=int, required=True)
     parser.add_argument("--real-gid", type=int, required=True)
     parser.add_argument("--bwrap-argv", required=True)
+    parser.add_argument(
+        "--lock-fd",
+        type=int,
+        default=None,
+        help="Project lock fd inherited across exec; closed in sandbox children",
+    )
     args = parser.parse_args()
 
     config = VaultConfig(
@@ -681,7 +713,10 @@ def main() -> None:
         shared=True,
     )
     bwrap_argv = json.loads(args.bwrap_argv)
-    serve(config, Path(args.sock_path), bwrap_argv, args.real_uid, args.real_gid)
+    serve(
+        config, Path(args.sock_path), bwrap_argv,
+        args.real_uid, args.real_gid, lock_fd=args.lock_fd,
+    )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,62 @@
 #+TITLE: pwrap issues
 #+TODO: TODO DONE
 
+* DONE [#A] Shared vault: lock fd leaked into sandbox; stale lock after primary dies
+Reported 2026-10-28: after a shared-vault primary session, the next =pwrap <project>=
+failed with "Primary vault session for '<name>' exists but is not accepting
+connections." Investigation with =lsof= revealed the project lock fd (fd 3) was
+held by FIVE processes: the serve process, its PTY proxy child, the fish shell
+inside the sandbox, and two vibe processes started from inside the sandbox.
+
+Root cause: ~vault.py:serve()~ holds the lock fd across the exec chain. When it
+forks children that exec bwrap via ~_pty_proxy()~ → ~pty.fork()~, bwrap inherits
+all fds (bwrap does not close inherited fds). The lock fd propagated into the
+sandbox and survived serve's death as long as any sandbox process was alive —
+the same bug class as single-mode F3, but in the shared-mode code path.
+
+Fixed 2026-10-28: ~_pty_proxy()~ now accepts a =close_fds= parameter and closes
+those fds before ~pty.fork()~. ~serve()~ receives the lock fd via a new
+=--lock-fd= CLI argument (passed by ~_exec_primary_serve~) and passes it to both
+_pty_proxy call sites (primary + attached clients). The sandbox never sees the
+lock fd. Tests: TestSharedModeLockFdLeak (test_exec_primary_serve_passes_lock_fd,
+test_pty_proxy_closes_lock_fd).
+
+Remaining sub-issues (not fixed, lower priority):
+- Stale gocryptfs daemon after serve dies without cleanup (SIGKILL, OOM, SSH
+  drop): the =finally= block in ~serve()~ (~vault.py:592~) does not run on
+  SIGKILL. The gocryptfs daemon survives orphaned. Fix options: startup stale
+  detection in ~run_vault~ / ~_attach_to_primary~, or a watcher process like
+  the single-mode F3 fix.
+- The error message in ~_attach_to_primary~ says "exists but is not accepting
+  connections" even when the socket file doesn't exist (FileNotFoundError).
+  The message should distinguish the two cases.
+
+* TODO [#A] Detect Ubuntu 24.04+ AppArmor userns restriction; give actionable error
+Reported 2026-10-28: on Ubuntu 24.04 LTS, =pwrap <project>= fails with
+=unshare: write failed /proc/self/uid_map: Operation not permitted=. Root cause:
+Ubuntu 23.10+ enables =kernel.apparmor_restrict_unprivileged_userns=1= by
+default, which blocks unprivileged processes from creating user namespaces
+unless they have an AppArmor profile that allows it. Both pwrap code paths
+need user namespaces:
+- Vault path: =unshare --user --map-root-user= (~vault.py:291~, ~vault.py:334~)
+- Plain sandbox: =bwrap= internally creates a user ns (~core.py:533~)
+
+The current =pwrap --check-deps= only checks that =bwrap= exists and supports
+=--unshare-user= / =--uid= flags — it does not test whether user namespaces
+actually work at runtime. The raw =unshare= error is cryptic and gives no hint
+about the fix.
+
+Fix:
+- Add a probe to ~deps.py~ that runs =unshare --user --map-root-user true= (or
+  =bwrap --unshare-user --uid 0 true=) and reports failure with an actionable
+  message: "user namespaces blocked (Ubuntu 24.04+ AppArmor restriction?).
+  Fix: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0"
+- Surface the probe result in =pwrap --check-deps= output
+- Optionally check at launch time in ~core.py:run_project~ / ~vault.py:run_vault~
+  and abort early with the same message instead of letting =unshare= fail
+- Add a "Troubleshooting" section to README.md documenting the Ubuntu sysctl
+  and the per-binary AppArmor profile alternative
+
 * TODO [#B] Split core.py into focused modules
 ~core.py~ still mixes config load, bwrap argv construction, shell argv, and project listing after
 the scaffold extraction. =bwrap.py= is the next natural seam — isolates the

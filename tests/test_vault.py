@@ -6,6 +6,7 @@ import fcntl
 import multiprocessing
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -189,3 +190,79 @@ class TestVaultWatcherScript:
     def test_quotes_mountpoint(self):
         script = vault._vault_watcher_script("/mnt/my vault", 3)
         assert "fusermount -u '/mnt/my vault'" in script
+
+
+class TestSharedModeLockFdLeak:
+    """The lock fd must not leak into the sandbox in shared mode.
+
+    serve() holds the lock fd across the exec chain. When it forks children
+    that exec bwrap via _pty_proxy, bwrap inherits all fds (it does not close
+    inherited fds). Without explicit closing, the lock survives serve's death
+    as long as any sandbox process is alive — the exact bug class fixed for
+    single mode in F3.
+    """
+
+    def test_exec_primary_serve_passes_lock_fd(self, monkeypatch):
+        """_exec_primary_serve must pass --lock-fd so serve can close it in children."""
+        captured = {}
+
+        def fake_execvp(_prog, argv):
+            captured["argv"] = argv
+            raise SystemExit(0)
+
+        monkeypatch.setattr(os, "execvp", fake_execvp)
+        monkeypatch.setattr(os, "set_inheritable", lambda *_: None)
+        monkeypatch.setattr(vault, "_sock_path", lambda _: Path("/tmp/test.sock"))
+
+        config = vault.VaultConfig(
+            cipherdir=Path("/cipher"),
+            mountpoint=Path("/mnt"),
+            project_name="test",
+            shared=True,
+        )
+        with pytest.raises(SystemExit):
+            vault._exec_primary_serve(config, ["bwrap", "true"], lock_fd=3)
+
+        argv = captured["argv"]
+        idx = argv.index("--lock-fd")
+        assert argv[idx + 1] == "3"
+
+    def test_pty_proxy_closes_lock_fd(self, monkeypatch, tmp_path):
+        """_pty_proxy must close close_fds before pty.fork so bwrap never sees them."""
+        # Create a real fd to close
+        lock_file = tmp_path / "test.lock"
+        lock_file.write_text("")
+        lock_fd = os.open(str(lock_file), os.O_RDWR)
+
+        closed_fds = []
+        real_close = os.close
+
+        def tracking_close(fd):
+            closed_fds.append(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(os, "close", tracking_close)
+
+        # Mock pty.fork to avoid actually forking — capture the child path
+        def fake_pty_fork():
+            # In the child path, verify the lock fd is closed
+            try:
+                os.fstat(lock_fd)
+                raise AssertionError("lock fd should be closed before pty.fork")
+            except OSError:
+                pass
+            raise SystemExit(0)
+
+        monkeypatch.setattr("pty.fork", fake_pty_fork)
+
+        # Mock select to avoid blocking
+        monkeypatch.setattr("select.select", lambda *_: ([], [], []))
+
+        with pytest.raises(SystemExit):
+            vault._pty_proxy(
+                ["bwrap", "true"],
+                [0, 1, 2],
+                close_fds=[lock_fd],
+            )
+
+        assert lock_fd in closed_fds
