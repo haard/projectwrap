@@ -50,6 +50,36 @@ class TestCLI:
         assert result == 1
         assert "Unknown project" in capsys.readouterr().err
 
+    def test_command_after_double_dash(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "project_wrap.cli.run_project",
+            lambda name, verbose, command: calls.append((name, verbose, command)),
+        )
+
+        result = main(["-v", "myproj", "--", "make", "-v", "--", "x"])
+
+        assert result == 0
+        # Options after the first -- belong to the command, not to pwrap
+        assert calls == [("myproj", True, ["make", "-v", "--", "x"])]
+
+    def test_no_command_after_double_dash(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["myproj", "--"])
+
+        assert exc_info.value.code == 2
+        assert "no command after --" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("args", [
+        ["--list"], ["--check-deps"], ["--new", "/tmp"], ["--guide", "/tmp"], [],
+    ])
+    def test_command_without_project(self, capsys, args):
+        with pytest.raises(SystemExit) as exc_info:
+            main([*args, "--", "true"])
+
+        assert exc_info.value.code == 2
+        assert "needs a project" in capsys.readouterr().err
+
     def test_new_first_run_creates_templates(self, tmp_path, monkeypatch, capsys):
         config_dir = tmp_path / "config"
         project_dir = tmp_path / "work"

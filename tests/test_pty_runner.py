@@ -289,7 +289,7 @@ class TestRunProjectDispatch:
         monkeypatch.setattr("project_wrap.pty_runner.run_on_pty", fake_run_on_pty)
         monkeypatch.setattr(os, "isatty", lambda fd: True)
         monkeypatch.setattr(
-            core, "prepare_project", lambda name, verbose=False: self._fake_result()
+            core, "prepare_project", lambda name, verbose=False, command=None: self._fake_result()
         )
 
         def fake_execvp(program, argv):
@@ -314,7 +314,9 @@ class TestRunProjectDispatch:
         monkeypatch.setattr("project_wrap.pty_runner.run_on_pty", fake_run_on_pty)
         monkeypatch.setattr(os, "isatty", lambda fd: True)
         monkeypatch.setattr(
-            core, "prepare_project", lambda name, verbose=False: self._fake_result(vault=True)
+            core,
+            "prepare_project",
+            lambda name, verbose=False, command=None: self._fake_result(vault=True),
         )
         seen = {}
 
@@ -342,7 +344,7 @@ class TestRunProjectDispatch:
         monkeypatch.setattr("project_wrap.pty_runner.run_on_pty", fake_run_on_pty)
         monkeypatch.setattr(os, "isatty", lambda fd: False)
         monkeypatch.setattr(
-            core, "prepare_project", lambda name, verbose=False: self._fake_result()
+            core, "prepare_project", lambda name, verbose=False, command=None: self._fake_result()
         )
 
         def fake_execvp(program, argv):
@@ -353,6 +355,45 @@ class TestRunProjectDispatch:
         with pytest.raises(RuntimeError, match="execvp /bin/echo"):
             run_project("proj")
         assert called == []
+
+    def test_command_with_redirected_stdout_keeps_plain_exec(self, monkeypatch):
+        """`pwrap p -- cmd > file` from a terminal: no pty, so stderr stays out of stdout."""
+        called = []
+
+        def fake_run_on_pty(child_fn, host_fd=0, host_out_fd=1):
+            called.append(child_fn)
+            return 7
+
+        monkeypatch.setattr("project_wrap.pty_runner.run_on_pty", fake_run_on_pty)
+        monkeypatch.setattr(os, "isatty", lambda fd: fd == 0)
+        monkeypatch.setattr(
+            core, "prepare_project", lambda name, verbose=False, command=None: self._fake_result()
+        )
+
+        def fake_execvp(program, argv):
+            raise RuntimeError(f"execvp {program}")
+
+        monkeypatch.setattr(os, "execvp", fake_execvp)
+
+        with pytest.raises(RuntimeError, match="execvp /bin/echo"):
+            run_project("proj", command=["/bin/echo", "hi"])
+        assert called == []
+
+    def test_command_on_a_terminal_uses_pty(self, monkeypatch):
+        called = []
+
+        def fake_run_on_pty(child_fn, host_fd=0, host_out_fd=1):
+            called.append(child_fn)
+            return 0
+
+        monkeypatch.setattr("project_wrap.pty_runner.run_on_pty", fake_run_on_pty)
+        monkeypatch.setattr(os, "isatty", lambda fd: True)
+        monkeypatch.setattr(
+            core, "prepare_project", lambda name, verbose=False, command=None: self._fake_result()
+        )
+        with pytest.raises(SystemExit):
+            run_project("proj", command=["/bin/echo", "hi"])
+        assert len(called) == 1
 
 
 def _write_project(xdg_root: Path, name: str, work: Path, sandboxed: bool,
