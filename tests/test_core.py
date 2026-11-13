@@ -2,12 +2,17 @@
 
 import os
 import shlex
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from project_wrap.core import (
+    RUN_SHELL,
+    ProjectExec,
     build_bwrap_args,
+    build_run_argv,
     build_shell_argv,
     expand_path,
     get_config_dir,
@@ -15,6 +20,7 @@ from project_wrap.core import (
     load_config,
     prepare_project,
     redact_bwrap_args,
+    run_project,
 )
 from project_wrap.validate import (
     check_config_permissions,
@@ -779,6 +785,85 @@ class TestWhitelistSymlinkResolution:
             )
 
 
+class TestBuildRunArgv:
+    """Tests for the argv that runs one command in a project."""
+
+    def test_setup_chained_with_and_and_command_positional(self, tmp_path):
+        project_dir = tmp_path / "my project"
+        init_script = tmp_path / "config" / "init.sh"
+
+        result = build_run_argv(RUN_SHELL, project_dir, init_script, ["echo", "a b", "$HOME"])
+
+        assert result[:2] == [RUN_SHELL, "-c"]
+        assert result[2] == (
+            f"cd {shlex.quote(str(project_dir))}"
+            ' && _pwrap_cmd=("$@") && set --'
+            f" && source {shlex.quote(str(init_script))} >&2"
+            ' && exec -- "${_pwrap_cmd[@]}"'
+        )
+        # $0 is a label; the command follows untouched, never quoted into the script
+        assert result[3:] == ["pwrap", "echo", "a b", "$HOME"]
+
+    def test_without_init_script(self, tmp_path):
+        result = build_run_argv(RUN_SHELL, tmp_path, None, ["true"])
+
+        assert result[2] == f'cd {shlex.quote(str(tmp_path))} && exec -- "$@"'
+
+    @pytest.mark.parametrize("init", ["shift || true", "set -- echo replaced", 'echo "args:$#"'])
+    def test_init_sees_no_args_and_cannot_change_the_command(self, tmp_path, init):
+        init_script = tmp_path / "init.sh"
+        init_script.write_text(f"{init}\n")
+
+        result = subprocess.run(
+            build_run_argv(RUN_SHELL, tmp_path, init_script, ["printf", "%s|", "a b", "c"]),
+            capture_output=True, text=True,
+        )
+
+        assert result.stdout == "a b|c|"
+        if "$#" in init:
+            assert result.stderr == "args:0\n"
+
+    def test_command_starting_with_dash_is_not_an_exec_option(self, tmp_path):
+        # Without "exec --", bash would take -c as exec's own option and clear the env
+        result = subprocess.run(
+            build_run_argv(RUN_SHELL, tmp_path, None, ["-c"]), capture_output=True, text=True,
+        )
+
+        assert result.returncode == 127
+        assert "exec: -c: not found" in result.stderr
+
+    def test_fish_sources_init_and_execs_argv(self, tmp_path):
+        init_script = tmp_path / "init.fish"
+
+        result = build_run_argv("/usr/bin/fish", tmp_path, init_script, ["make", "a b"])
+
+        assert result == [
+            "/usr/bin/fish", "-c",
+            f"cd {shlex.quote(str(tmp_path))}"
+            f" && source {shlex.quote(str(init_script))} >&2 && exec $argv",
+            "make", "a b",
+        ]
+
+    @pytest.mark.skipif(not shutil.which("fish"), reason="fish not on PATH")
+    @pytest.mark.parametrize(
+        "init", ["set -e argv[1]", "set argv replaced", "echo args:(count $argv)"]
+    )
+    def test_fish_init_sees_no_args_and_cannot_change_the_command(self, tmp_path, init):
+        init_script = tmp_path / "init.fish"
+        init_script.write_text(f"{init}\n")
+        fish = shutil.which("fish")
+        assert fish is not None
+
+        result = subprocess.run(
+            build_run_argv(fish, tmp_path, init_script, ["printf", "%s|", "a b", "c"]),
+            capture_output=True, text=True,
+        )
+
+        assert result.stdout == "a b|c|"
+        if "count" in init:
+            assert result.stderr == "args:0\n"
+
+
 def _make_project_config(tmp_path, monkeypatch, toml_content, project_name="testproj"):
     """Helper to set up a project config dir for prepare_project tests."""
     config_dir = tmp_path / "config"
@@ -868,6 +953,166 @@ shell = "{fake_shell}"
 
         with pytest.raises(SystemExit, match="Project directory does not exist"):
             prepare_project("testproj")
+
+
+class TestPrepareProjectCommand:
+    """Tests for prepare_project when running a command."""
+
+    @pytest.fixture
+    def shells(self, tmp_path, monkeypatch):
+        """A fake profile shell (zsh), fish and bash for running commands."""
+        fake_shell = tmp_path / "zsh"
+        fake_bash = tmp_path / "bash"
+        fake_fish = tmp_path / "fish"
+        for path in (fake_shell, fake_bash, fake_fish):
+            path.write_text("#!/bin/sh")
+            path.chmod(0o755)
+        fake_etc = tmp_path / "shells"
+        fake_etc.write_text(f"{fake_shell}\n{fake_bash}\n{fake_fish}\n")
+        monkeypatch.setattr("project_wrap.validate.ETC_SHELLS", fake_etc)
+        monkeypatch.setattr("project_wrap.core.RUN_SHELL", str(fake_bash))
+        monkeypatch.setattr("shutil.which", lambda x: f"/usr/bin/{x}")
+        project_dir = tmp_path / "work"
+        project_dir.mkdir()
+        return fake_shell, fake_bash, project_dir
+
+    def test_sandboxed_command_runs_under_bash_with_new_session(self, tmp_path, monkeypatch,
+                                                                 shells):
+        fake_shell, fake_bash, project_dir = shells
+        _, conf_dir = _make_project_config(tmp_path, monkeypatch, f"""
+[project]
+dir = "{project_dir}"
+shell = "{fake_shell}"
+
+[sandbox]
+enabled = true
+new_session = false
+""")
+        (conf_dir / "init.sh").write_text("# sh")
+
+        result = prepare_project("testproj", command=["make", "test"])
+
+        assert result.program == "bwrap"
+        assert "--new-session" in result.argv
+        expected = build_run_argv(
+            str(fake_bash), project_dir, conf_dir / "init.sh", ["make", "test"]
+        )
+        assert expected[0] == str(fake_bash)
+        assert result.argv[-len(expected):] == expected
+
+    def test_unsandboxed_command(self, tmp_path, monkeypatch, shells):
+        fake_shell, fake_bash, project_dir = shells
+        _make_project_config(tmp_path, monkeypatch, f"""
+[project]
+dir = "{project_dir}"
+shell = "{fake_shell}"
+""")
+
+        result = prepare_project("testproj", command=["true"])
+
+        assert result.program == str(fake_bash)
+        assert result.argv == build_run_argv(str(fake_bash), project_dir, None, ["true"])
+
+    def test_does_not_rename_tmux_window(self, tmp_path, monkeypatch, shells):
+        fake_shell, _, project_dir = shells
+        _make_project_config(tmp_path, monkeypatch, f"""
+[project]
+dir = "{project_dir}"
+shell = "{fake_shell}"
+""")
+        renamed: list[str] = []
+        monkeypatch.setattr("project_wrap.core.rename_tmux_window", renamed.append)
+
+        prepare_project("testproj", command=["true"])
+
+        assert renamed == []
+
+    def test_only_profile_shell_init_raises(self, tmp_path, monkeypatch, shells):
+        fake_shell, _, project_dir = shells
+        _, conf_dir = _make_project_config(tmp_path, monkeypatch, f"""
+[project]
+dir = "{project_dir}"
+shell = "{fake_shell}"
+""")
+        (conf_dir / "init.zsh").write_text("# zsh")
+
+        with pytest.raises(SystemExit, match="only has init.zsh"):
+            prepare_project("testproj", command=["true"])
+
+    def test_fish_project_runs_under_fish_with_init_fish(self, tmp_path, monkeypatch, shells):
+        _, _, project_dir = shells
+        fake_fish = tmp_path / "fish"
+        _, conf_dir = _make_project_config(tmp_path, monkeypatch, f"""
+[project]
+dir = "{project_dir}"
+shell = "{fake_fish}"
+""")
+        (conf_dir / "init.fish").write_text("# fish")
+
+        result = prepare_project("testproj", command=["make"])
+
+        assert result.program == str(fake_fish)
+        assert result.argv == build_run_argv(
+            str(fake_fish), project_dir, conf_dir / "init.fish", ["make"]
+        )
+
+    def test_command_starting_with_dash_raises(self):
+        with pytest.raises(SystemExit, match="must not start with '-'"):
+            prepare_project("testproj", command=["-c", "env"])
+
+    def test_encrypted_raises(self, tmp_path, monkeypatch, shells):
+        fake_shell, _, project_dir = shells
+        (tmp_path / "cipherdir").mkdir()
+        _make_project_config(tmp_path, monkeypatch, f"""
+[project]
+dir = "{project_dir}"
+shell = "{fake_shell}"
+
+[sandbox]
+enabled = true
+
+[encrypted]
+cipherdir = "{tmp_path / 'cipherdir'}"
+mountpoint = "{tmp_path / 'decrypted'}"
+""")
+
+        with pytest.raises(SystemExit, match="not supported for \\[encrypted\\]"):
+            prepare_project("testproj", command=["true"])
+
+    def test_empty_command_raises(self):
+        with pytest.raises(SystemExit, match="No command to run"):
+            prepare_project("testproj", command=[])
+
+
+class TestRunProjectOutput:
+    """pwrap's own messages must stay off a command's stdout."""
+
+    @pytest.fixture
+    def exec_calls(self, monkeypatch):
+        result = ProjectExec(
+            display_name="proj", program="bwrap", argv=["bwrap"],
+            is_sandboxed=True, verbose_info="bwrap args",
+        )
+        monkeypatch.setattr("project_wrap.core.prepare_project", lambda *a: result)
+        calls: list[tuple[str, list[str]]] = []
+        monkeypatch.setattr("os.execvp", lambda prog, argv: calls.append((prog, argv)))
+        return calls
+
+    def test_command_messages_go_to_stderr(self, exec_calls, capsys):
+        run_project("proj", verbose=True, command=["true"])
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == "Loading proj (sandboxed)\nbwrap args\n"
+        assert exec_calls == [("bwrap", ["bwrap"])]
+
+    def test_shell_messages_go_to_stdout(self, exec_calls, capsys):
+        run_project("proj", verbose=True)
+
+        captured = capsys.readouterr()
+        assert captured.out == "Loading proj (sandboxed)\nbwrap args\n"
+        assert captured.err == ""
+
 
 class TestBwrapRoBindExtra:
     """Tests for ro_bind_extra parameter in build_bwrap_args."""

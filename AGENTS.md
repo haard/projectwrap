@@ -42,6 +42,7 @@ tests/
 ├── test_deps.py
 ├── test_guide.py     # guided mode: detection, config gen, wizard flow
 ├── test_scaffold.py
+├── test_run_integration.py    # opt-in, runs `pwrap <project> -- <cmd>` under real bwrap
 ├── test_vault.py
 └── test_vault_integration.py  # opt-in, execs real bwrap/gocryptfs/unshare
 completions/          # fish, bash, zsh shell completions
