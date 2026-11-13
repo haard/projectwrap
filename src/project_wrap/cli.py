@@ -84,10 +84,19 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] == ["unpack"]:
         return _unpack_cli(argv[1:])
 
+    # Everything after the first -- is a command to run in the project
+    command: list[str] | None = None
+    if "--" in argv:
+        split = argv.index("--")
+        argv, command = argv[:split], argv[split + 1 :]
+
     parser = argparse.ArgumentParser(
         prog="pwrap",
+        usage="%(prog)s [options] [project [-- command ...]]",
         description="Isolated project environments with bubblewrap sandboxing",
-        epilog="Subcommands: pwrap pack <project> [-o FILE], "
+        epilog="Run one command in a project instead of a shell: "
+        "pwrap <project> -- <command> [args...]. "
+        "Subcommands: pwrap pack <project> [-o FILE], "
         "pwrap unpack <file> <path> [--force]",
     )
     parser.add_argument(
@@ -140,6 +149,12 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    if command is not None:
+        if args.new or args.guide or args.list or args.check_deps or not args.project:
+            parser.error("-- command needs a project and no other action")
+        if not command:
+            parser.error("no command after --")
+
     try:
         if args.check_deps:
             check_optional_deps(verbose=True)
@@ -176,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             list_projects()
             return 0
 
-        run_project(args.project, verbose=args.verbose)
+        run_project(args.project, verbose=args.verbose, command=command)
         return 0  # Won't reach here if exec succeeds
 
     except KeyboardInterrupt:

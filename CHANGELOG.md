@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Add `pwrap <project> -- <command> [args...]` to run one command in the
+  project's sandbox instead of a shell. Same mounts and environment rules as
+  the shell; stdio and exit code pass through. Runs from fish with
+  `init.fish` when that is the project shell, otherwise from bash with
+  `init.sh`. Setup is fail-closed (`cd` and the init script are chained with
+  `&&`), pwrap's own output and init output go to stderr, `--new-session` is
+  always on in a sandbox, and `[encrypted]` projects are refused. `cli.py`,
+  `core.py`, `README.md`
+
 ## 202610.1.0
 
 - Known limitation: `pwrap unpack` extraction filter does not resolve hardlink

@@ -368,6 +368,46 @@ def build_shell_argv(
     return [shell, "-c", "; ".join(commands)]
 
 
+# Commands run from fish when that is the profile shell, so init.fish works
+# as is, and otherwise from bash, so that one init.sh works for every caller
+RUN_SHELL = "/bin/bash"
+
+
+def build_run_argv(
+    shell: str,
+    project_dir: Path,
+    init_script: Path | None,
+    command: list[str],
+) -> list[str]:
+    """Build the argv to run one command with project setup.
+
+    Setup is joined with && so a failing cd or init script stops the command
+    instead of running it anyway. Init output goes to stderr, leaving stdout
+    to the command. The command is passed as arguments, so it is never quoted
+    into the script, and init sees no arguments (as in the shell) and cannot
+    shift or replace them:
+    - fish: `source` gives the init script its own empty $argv
+    - bash: the command is set aside while init runs
+    """
+    steps = [f"cd {shlex.quote(str(project_dir))}"]
+    if Path(shell).name == "fish":
+        if init_script is not None:
+            steps.append(f"source {shlex.quote(str(init_script))} >&2")
+        steps.append("exec $argv")
+        return [shell, "-c", " && ".join(steps), *command]
+
+    if init_script is None:
+        steps.append('exec -- "$@"')
+    else:
+        steps += [
+            '_pwrap_cmd=("$@")',
+            "set --",
+            f"source {shlex.quote(str(init_script))} >&2",
+            'exec -- "${_pwrap_cmd[@]}"',
+        ]
+    return [shell, "-c", " && ".join(steps), "pwrap", *command]
+
+
 def redact_bwrap_args(args: list[str]) -> list[str]:
     """Redact --setenv values from bwrap args for display."""
     redacted = list(args)
@@ -390,12 +430,23 @@ def rename_tmux_window(name: str) -> None:
         )
 
 
-def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
+def prepare_project(
+    name: str, verbose: bool = False, command: list[str] | None = None,
+) -> ProjectExec:
     """Prepare a project environment for execution.
 
     Loads config, renames tmux window, and returns everything needed
-    to exec into the project shell.
+    to exec into the project shell. When `command` is given it runs instead
+    of the shell, under fish if that is the profile shell and RUN_SHELL
+    otherwise, without renaming the tmux window and with `new_session`
+    forced on; `[encrypted]` projects are refused.
     """
+    if command is not None and not command:
+        raise SystemExit("No command to run")
+    # fish's exec takes a leading - as its own option, so refuse it up front
+    if command and command[0].startswith("-"):
+        raise SystemExit(f"Command must not start with '-': {command[0]}")
+
     config = load_config(name)
 
     # Extract config sections
@@ -421,6 +472,11 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
         raise SystemExit(
             "[encrypted] requires sandbox to be enabled"
         )
+
+    # The vault asks for its password on the terminal, which a command run
+    # from a script or pipe may not have
+    if encrypted_cfg and command is not None:
+        raise SystemExit("Running a command is not supported for [encrypted] projects")
 
     # Resolve encrypted volume config
     vault_config: VaultConfig | None = None
@@ -450,12 +506,26 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
             shared=encrypted_cfg.get("shared", False),
         )
 
-    # Rename tmux window
-    rename_tmux_window(display_name)
-
     # Resolve init script and build shell argv
-    init_script = get_init_script(config_dir, shell)
-    shell_argv = build_shell_argv(project_dir, config_dir, shell)
+    if command is None:
+        rename_tmux_window(display_name)
+        init_script = get_init_script(config_dir, shell)
+        shell_argv = build_shell_argv(project_dir, config_dir, shell)
+        program = shell
+    else:
+        run_shell = shell if Path(shell).name == "fish" else RUN_SHELL
+        validate_shell(run_shell)
+        init_script = get_init_script(config_dir, run_shell)
+        if init_script is None and get_init_script(config_dir, shell) is not None:
+            raise SystemExit(
+                f"Running a command sources init.sh, but {config_dir} only has "
+                f"init.{Path(shell).name}"
+            )
+        shell_argv = build_run_argv(run_shell, project_dir, init_script, command)
+        program = run_shell
+        # Commands are often started by other tools, so always close the
+        # TIOCSTI hole. This also drops job control for interactive commands.
+        sandbox_cfg = {**sandbox_cfg, "new_session": True}
 
     # Expand ~/... in env values
     resolved_env: dict[str, str] = {}
@@ -468,7 +538,7 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
             os.environ[k] = v
         return ProjectExec(
             display_name=display_name,
-            program=shell,
+            program=program,
             argv=shell_argv,
         )
 
@@ -505,14 +575,17 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
     )
 
 
-def run_project(name: str, verbose: bool = False) -> None:
+def run_project(name: str, verbose: bool = False, command: list[str] | None = None) -> None:
     """Load and run a project environment.
 
-    This function does not return on success (execs into new shell).
+    This function does not return on success (execs into new shell, or
+    into `command`). When running a command, pwrap's own messages go to
+    stderr so that stdout is the command's alone.
     """
     from .vault import run_vault
 
-    result = prepare_project(name, verbose)
+    result = prepare_project(name, verbose, command)
+    out = sys.stdout if command is None else sys.stderr
 
     label = result.display_name
     if result.is_sandboxed:
@@ -522,10 +595,10 @@ def run_project(name: str, verbose: bool = False) -> None:
                 label += " (shared vault)"
             else:
                 label += " (vault)"
-    print(f"Loading {label}")
+    print(f"Loading {label}", file=out, flush=True)
 
     if result.verbose_info:
-        print(result.verbose_info)
+        print(result.verbose_info, file=out, flush=True)
 
     if result.vault_config:
         sys.exit(run_vault(result.vault_config, result.argv))
