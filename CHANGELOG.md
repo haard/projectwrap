@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 202611.0.0
+
+- Interactive launches (stdin is a tty) now run the sandbox exec chain on a pty
+  allocated by pwrap itself (`pty_runner.run_on_pty`): the child becomes a
+  session leader with the pty slave as controlling terminal, and the parent
+  relays I/O while copying the host window size onto the master on every
+  SIGWINCH (TIOCSWINSZ), which delivers SIGWINCH inside the sandbox. Terminal
+  resizes — including tmux window resizes — now update `stty size` and repaint
+  full-screen TUIs immediately inside the sandbox instead of freezing at the
+  size the sandbox was entered with. The host tty is put in raw mode while
+  relaying (single echo), SIGINT/SIGTERM/SIGHUP are forwarded to the child's
+  process group, and the host tty state is restored on exit. The sandbox only
+  ever sees pwrap's own pty slave — host /dev and /dev/pts are never bound in,
+  so host pty nodes (TIOCSTI targets) stay unreachable. Non-interactive use
+  (piped stdin) keeps the previous plain exec behavior unchanged. The shared
+  vault's `_pty_proxy` also propagates SIGWINCH now — `pty_runner.py`,
+  `core.py:run_project`, `vault.py:_pty_proxy`, `tests/test_pty_runner.py`
 
 - Fix shared-vault lock fd leak into the sandbox: the project lock fd was
   inherited by bwrap (which does not close inherited fds) and propagated into

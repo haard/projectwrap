@@ -34,6 +34,7 @@ src/project_wrap/
 ├── guide.py          # --guide interactive wizard: auto-detect + Q&A → config
 ├── deps.py           # optional dependency checking (bwrap, gocryptfs)
 ├── vault.py          # gocryptfs encrypted volume lifecycle (single + shared)
+├── pty_runner.py     # pty front-end: interactive launches run on a pwrap-owned pty
 └── templates/        # default project.toml, init.fish, init.sh
 tests/
 ├── conftest.py       # autouse fixtures: stub bwrap probe, isolate docker sockets
@@ -41,6 +42,7 @@ tests/
 ├── test_core.py
 ├── test_deps.py
 ├── test_guide.py     # guided mode: detection, config gen, wizard flow
+├── test_pty_runner.py  # pty front-end: resize propagation, relay, fallback, e2e
 ├── test_scaffold.py
 ├── test_vault.py
 └── test_vault_integration.py  # opt-in, execs real bwrap/gocryptfs/unshare
@@ -134,6 +136,12 @@ security defaults section in `README.md` and the relevant tests.
   `ScriptedPrompter` for tests).
 - **`deps.py`** probes optional dependencies. The bwrap probe checks for
   `--unshare-user` and `--uid` flags (required by the vault uid-mapping chain).
+- **`pty_runner.py`** runs interactive launches (stdin is a tty) on a pty
+  allocated by pwrap: the child gets the slave as controlling terminal and the
+  parent relays I/O and propagates SIGWINCH via TIOCSWINSZ on the master, so
+  terminal resizes reach the sandbox. Non-interactive (piped) launches keep
+  the plain exec path. The sandbox never sees host /dev or /dev/pts — only
+  pwrap's own pty slave.
 
 ## Commit Conventions
 

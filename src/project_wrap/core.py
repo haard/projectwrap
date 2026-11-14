@@ -508,7 +508,10 @@ def prepare_project(name: str, verbose: bool = False) -> ProjectExec:
 def run_project(name: str, verbose: bool = False) -> None:
     """Load and run a project environment.
 
-    This function does not return on success (execs into new shell).
+    Interactive launches (stdin is a tty) run the exec chain on a pty
+    allocated by pwrap itself, so terminal resizes propagate into the
+    sandbox (see pty_runner). Non-interactive launches (piped stdin) keep
+    the plain exec behaviour. Neither path returns on success.
     """
     from .vault import run_vault
 
@@ -527,10 +530,16 @@ def run_project(name: str, verbose: bool = False) -> None:
     if result.verbose_info:
         print(result.verbose_info)
 
-    if result.vault_config:
-        sys.exit(run_vault(result.vault_config, result.argv))
-    else:
+    def _launch() -> None:
+        if result.vault_config:
+            sys.exit(run_vault(result.vault_config, result.argv))
         os.execvp(result.program, result.argv)
+
+    if os.isatty(0):
+        from .pty_runner import run_on_pty
+
+        sys.exit(run_on_pty(_launch))
+    _launch()
 
 
 

@@ -472,6 +472,11 @@ When sandboxing is enabled:
   `PATH/HOME/USER/SHELL/TERM/LANG`; pass others through with `[env]` to
   prevent accidental leakage of `ANTHROPIC_API_KEY`, `AWS_*`, `GH_TOKEN`, etc.
 - PID and IPC namespaces are isolated
+- Interactive launches run on a pty allocated by pwrap itself: terminal
+  resizes (e.g. tmux window resizes) propagate into the sandbox immediately
+  (`stty size` and full-screen TUIs stay in sync). The sandbox only sees
+  pwrap's own pty — host `/dev` and `/dev/pts` are never bound in, so host
+  pty nodes (TIOCSTI injection targets) stay unreachable
 - TIOCSTI injection blocked automatically on kernels < 6.2
 - XDG runtime directory isolated (D-Bus, Wayland, keyring sockets)
 - Sandbox dies with parent process

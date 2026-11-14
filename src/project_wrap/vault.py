@@ -184,6 +184,21 @@ def _pty_proxy(
     if winsize:
         fcntl.ioctl(pty_fd, termios.TIOCSWINSZ, winsize)
 
+    def _propagate_winsz(_signum: int, _frame: object) -> None:
+        # Keep the sandbox pty in sync with the client terminal: on every
+        # SIGWINCH, copy the client's window size onto the pty master, which
+        # delivers SIGWINCH to bwrap's foreground process group inside.
+        try:
+            fcntl.ioctl(
+                pty_fd,
+                termios.TIOCSWINSZ,
+                fcntl.ioctl(client_in, termios.TIOCGWINSZ, b"\x00" * 8),
+            )
+        except OSError:
+            pass
+
+    signal.signal(signal.SIGWINCH, _propagate_winsz)
+
     if old_attrs:
         tty.setraw(client_in)
 
