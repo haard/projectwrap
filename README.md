@@ -444,6 +444,7 @@ directories are refused unless you pass `--force`.
 pwrap                                      # list projects
 pwrap myproject                            # launch project
 pwrap -v myproject                         # verbose output
+pwrap myproject -- make test               # run one command instead of a shell
 pwrap --guide ~/projects/myproject         # guided setup for existing folder
 pwrap --new ~/projects/myproject           # create config (name = dir basename)
 pwrap --new --shell /bin/bash ~/projects/x # specify shell
@@ -452,6 +453,43 @@ pwrap unpack myproject.pwrap.tar.gz ~/projects/myproject  # unpack on another ma
 pwrap --check-deps                         # check optional dependencies
 pwrap --version                            # show version
 ```
+
+##### Running a command #####
+
+`pwrap myproject -- <command> [args...]` runs one command in the project's
+sandbox instead of an interactive shell, for scripts, CI jobs and agents
+started by other tools. stdin and stdout pass straight through, and the exit
+code is the command's.
+
+- It is the same sandbox as the shell: same mounts, same `clean_env` and
+  `[env]`. Nothing from the calling environment gets in that wouldn't get
+  into the shell. A project without `[sandbox] enabled = true` runs the
+  command on the host, as it would the shell; the stderr banner says
+  `(sandboxed)` only when it is.
+- If the project shell is fish, the command runs from `fish -c`, which reads
+  your fish config as usual (keep its output inside `status is-interactive`,
+  or it lands on the command's stdout) and then sources `init.fish`. Otherwise it runs
+  from bash, which sources `init.bash` or `init.sh`; a project with only
+  another shell's init script (say `init.zsh`) is refused rather than run
+  without its setup.
+- If `cd` or the init script fails, the command does not run. In fish, `set`
+  keeps the status of the command before it, so an `init.fish` whose last
+  real command failed counts as failed even when it ends in `set` lines.
+- The command is exec'd, so it must be a program: functions and aliases
+  defined in the init script are not available to it, and a command name
+  starting with `-` is refused.
+- An init script must not `exit`: that ends the shell before the command
+  runs, with the init script's exit code.
+- stdout belongs to the command: pwrap's messages and init script output go
+  to stderr.
+- In a sandbox, `--new-session` is always on, whatever the config says, to
+  close the TIOCSTI hole for commands started by other tools. The command
+  then has no controlling terminal, so interactive programs lose job control;
+  use the shell for those.
+- `[encrypted]` projects are refused: the vault needs a password typed at a
+  terminal.
+- To start in a subdirectory, let the command change into it:
+  `pwrap myproject -- env -C src make`.
 
 #### Security Defaults ####
 
